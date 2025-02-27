@@ -93,7 +93,7 @@ class Image:
 
     def read_dicom_image(self, dicom_dir, modality):
         dicom_files = get_dicom_files(directory=dicom_dir, modality=modality)
-        if modality in ["CT", "MRI", "PET"]:
+        if modality in ["CT", "MRI", "PET", "RTDOSE"]:
             validate_z_spacing(dicom_files)
         image = process_dicom_series(dicom_dir, dicom_files)
         if modality == 'PET':
