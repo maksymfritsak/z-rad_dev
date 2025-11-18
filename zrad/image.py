@@ -346,7 +346,7 @@ def validate_pet_dicom_tags(dicom_files):
                 error_msg = f"For patient's {image_id} image, patient is excluded from the analysis due to the negative time difference in the decay factor."
                 raise DataStructureError(error_msg)
             elif elapsed_time > 0 and abs(elapsed_time) < 1800 and ds.DecayCorrection != 'ADMIN':
-                warning_msg = f"{image_id} Only {abs(elapsed_time) / 60} minutes after the injection."
+                warning_msg = f"Only {abs(elapsed_time) / 60} minutes after the injection."
                 warnings.warn(warning_msg, DataStructureWarning)
         elif ds.Units == 'CNTS' and 'PHILIPS' in ds.Manufacturer.upper():
             if not (((0x7053, 0x1009) in ds and ds[(0x7053, 0x1009)].value != 0) or (
