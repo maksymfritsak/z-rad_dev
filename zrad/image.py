@@ -96,7 +96,7 @@ class Image:
         if len(dicom_files) == 0:
             raise DataStructureError(f"No {modality} data found in {dicom_dir}. Patient skipped.")
         if modality in ["CT", "MRI", "PET"]:
-            validate_z_spacing(dicom_files)
+            validate_z_spacing(dicom_files, dicom_dir)
         if modality in ["CT", "MRI", "PET", "MG"]:
             image = process_dicom_series(dicom_files)
         if modality == 'PET':
@@ -142,6 +142,58 @@ class Image:
         return dose_image
 
 
+def remove_duplicate_slices(dicom_files_info):
+    """
+    Remove duplicate slices with identical ImagePositionPatient (IPP).
+    Keeps the first occurrence of each IPP (in the order coming from
+    GetGDCMSeriesFileNames, which is already geometrically sorted).
+    """
+    cleaned = []
+    seen_ipps = set()
+    duplicates = 0
+
+    for info in dicom_files_info:
+        ds = info['ds']
+
+        ipp_raw = ds.get((0x0020, 0x0032))
+        ipp = tuple(map(float, ipp_raw)) if ipp_raw is not None else None
+
+        if ipp is None:
+            cleaned.append(info)
+            continue
+
+        if ipp in seen_ipps:
+            duplicates += 1
+            continue
+
+        seen_ipps.add(ipp)
+        cleaned.append(info)
+    if duplicates > 0:
+        warnings.warn(
+            f"Removed {duplicates} duplicate slice(s) with identical ImagePositionPatient {info['file_path']}.",
+            DataStructureWarning
+        )
+
+    return cleaned
+
+
+def sort_by_geometric_position(dicom_files_info):
+    """
+    Sort slices by physical position using ImageOrientationPatient + ImagePositionPatient
+    (distance along the slice normal).
+    """
+
+    def slice_distance(ds):
+        iop = np.array(ds.ImageOrientationPatient, dtype=float)
+        row = iop[:3]
+        col = iop[3:]
+        normal = np.cross(row, col)
+        ipp = np.array(ds.ImagePositionPatient, dtype=float)
+        return float(np.dot(ipp, normal))
+
+    return sorted(dicom_files_info, key=lambda x: slice_distance(x['ds']))
+
+
 def get_dicom_files(directory, modality):
     modality_dicom = modality_mapping(modality)
     dicom_files_info = []
@@ -149,11 +201,14 @@ def get_dicom_files(directory, modality):
         reader = sitk.ImageSeriesReader()
         series_IDs = reader.GetGDCMSeriesIDs(directory)
         selected_series = None
+        acquisition_number = None
         for sid in series_IDs:
             files = reader.GetGDCMSeriesFileNames(directory, sid)
             dcm = pydicom.dcmread(os.path.join(directory, files[0]), stop_before_pixels=True)
             if dcm.Modality == modality_dicom:
                 selected_series = sid
+                if hasattr(dcm, 'AcquisitionNumber'):
+                    acquisition_number = dcm.AcquisitionNumber
                 break
         if selected_series is None:
             raise DataStructureError(f"No {modality_dicom} series found for {directory}. Patient skipped")
@@ -167,9 +222,16 @@ def get_dicom_files(directory, modality):
 
             # Check if the DICOM file's Modality matches the desired modality
             if ds.Modality == modality_dicom:
-                if hasattr(ds, 'ImageType') and ('LOCALIZER' in ds.ImageType or any('MIP' in entry for entry in ds.ImageType)):
+                if hasattr(ds, 'ImageType') and (
+                        'LOCALIZER' in ds.ImageType or any('MIP' in entry for entry in ds.ImageType)):
                     continue
-                dicom_files_info.append({'file_path': file_path, 'ds': ds})
+                if hasattr(ds, 'AcquisitionNumber') and ds.AcquisitionNumber == acquisition_number:
+                    dicom_files_info.append({'file_path': file_path, 'ds': ds})
+                elif not hasattr(ds, 'AcquisitionNumber') and acquisition_number is None:
+                    dicom_files_info.append({'file_path': file_path, 'ds': ds})
+                else:
+                    continue
+
         except InvalidDicomError:
             # File is not a valid DICOM; skip it
             continue
@@ -177,10 +239,14 @@ def get_dicom_files(directory, modality):
             # Handle any other unexpected exceptions
             warning_msg = f"An error occurred while processing file {file_path}: {str(e)}"
             warnings.warn(warning_msg, DataStructureWarning)
+
+    dicom_files_info = remove_duplicate_slices(dicom_files_info)
+    dicom_files_info = sort_by_geometric_position(dicom_files_info)
     return dicom_files_info
 
 
-def validate_z_spacing(dicom_files):
+def validate_z_spacing(dicom_files, dicom_dir):
+    tot_div = 0
     slice_z_origin = []
     for dcm_file in dicom_files:
         slice_z_origin.append(float(dcm_file['ds'].ImagePositionPatient[2]))
@@ -188,10 +254,14 @@ def validate_z_spacing(dicom_files):
     slice_thickness = [abs(slice_z_origin[i] - slice_z_origin[i + 1]) for i in range(len(slice_z_origin) - 1)]
     for i in range(len(slice_thickness) - 1):
         spacing_difference = abs((slice_thickness[i] - slice_thickness[i + 1]))
-        spacing_threshold = 0.1
+        tot_div += spacing_difference
+        spacing_threshold = 5
         if spacing_difference > spacing_threshold:
-            error_msg = f'Inconsistent z-spacing. Absolute deviation is {spacing_difference:.3f} which is greater than {spacing_threshold:.3f} mm.'
+            error_msg = f'{dicom_dir}: Absolute deviation is {spacing_difference:.3f} mm.'
             raise DataStructureError(error_msg)
+    if tot_div > 25:
+        warning_msg = f'{dicom_dir}: Total deviation is {tot_div:.3f} mm.'
+        warnings.warn(warning_msg, DataStructureWarning)
 
 
 def calc_elapsed_time(ds, decay_constant, acquisition_time, injection_time):
@@ -238,10 +308,10 @@ def validate_pet_dicom_tags(dicom_files):
                 elif 'SIEMENS' in ds.Manufacturer.upper() or 'CPS' in ds.Manufacturer.upper():
                     try:
                         elapsed_time = (
-                                    parse_time(ds[(0x0071, 0x1022)].value).replace(year=injection_time.year,
-                                                                                   month=injection_time.month,
-                                                                                   day=injection_time.day)
-                                    - injection_time).total_seconds()
+                                parse_time(ds[(0x0071, 0x1022)].value).replace(year=injection_time.year,
+                                                                               month=injection_time.month,
+                                                                               day=injection_time.day)
+                                - injection_time).total_seconds()
 
                     except (KeyError, TypeError):
                         acquisition_time = parse_time(ds.AcquisitionTime).replace(year=injection_time.year,
@@ -252,10 +322,10 @@ def validate_pet_dicom_tags(dicom_files):
                 elif 'GE' in ds.Manufacturer.upper():
                     try:
                         elapsed_time = (
-                                    parse_time(ds[(0x0009, 0x100d)].value).replace(year=injection_time.year,
-                                                                                   month=injection_time.month,
-                                                                                   day=injection_time.day)
-                                    - injection_time).total_seconds()
+                                parse_time(ds[(0x0009, 0x100d)].value).replace(year=injection_time.year,
+                                                                               month=injection_time.month,
+                                                                               day=injection_time.day)
+                                - injection_time).total_seconds()
                     except (KeyError, TypeError):
                         acquisition_time = parse_time(ds.AcquisitionTime).replace(year=injection_time.year,
                                                                                   month=injection_time.month,
@@ -276,10 +346,11 @@ def validate_pet_dicom_tags(dicom_files):
                 error_msg = f"For patient's {image_id} image, patient is excluded from the analysis due to the negative time difference in the decay factor."
                 raise DataStructureError(error_msg)
             elif elapsed_time > 0 and abs(elapsed_time) < 1800 and ds.DecayCorrection != 'ADMIN':
-                warning_msg = f"Only {abs(elapsed_time) / 60} minutes after the injection."
+                warning_msg = f"{image_id} Only {abs(elapsed_time) / 60} minutes after the injection."
                 warnings.warn(warning_msg, DataStructureWarning)
         elif ds.Units == 'CNTS' and 'PHILIPS' in ds.Manufacturer.upper():
-            if not (((0x7053, 0x1009) in ds and ds[(0x7053, 0x1009)].value != 0) or ((0x7053, 0x1000) in ds and ds[(0x7053, 0x1000)].value != 0)):
+            if not (((0x7053, 0x1009) in ds and ds[(0x7053, 0x1009)].value != 0) or (
+                    (0x7053, 0x1000) in ds and ds[(0x7053, 0x1000)].value != 0)):
                 error_msg = f"For patient's {image_id} image, patient is excluded, Philips scale factors not present (PET units CNTS)"
                 raise DataStructureError(error_msg)
         elif ds.Units == 'GML':
@@ -293,7 +364,6 @@ def validate_pet_dicom_tags(dicom_files):
 
 
 def apply_suv_correction(dicom_files, suv_image):
-
     def process_single_slice(dicom_file_path):
 
         def process_gml(pixel_array_units):
@@ -354,6 +424,9 @@ def apply_suv_correction(dicom_files, suv_image):
 
             decay_factor = np.exp(-1 * ((np.log(2) * elapsed_time) / half_life))
             decay_corrected_dose = injected_dose * decay_factor
+            if decay_corrected_dose == 0 or patient_weight == 0:
+                error_msg = f"For patient's {dicom_file_path} decay corrected dose or weight is zero"
+                raise DataStructureError(error_msg)
             suv = activity_concentration / (decay_corrected_dose / (patient_weight * 1000))
 
             return suv
@@ -416,9 +489,11 @@ def apply_suv_correction(dicom_files, suv_image):
     intensity_image.SetDirection(np.array(suv_image.GetDirection()))
     return intensity_image
 
+
 def modality_mapping(modality):
     modality_map = {'PET': 'PT', 'CT': 'CT', 'MRI': 'MR', 'RTSTRUCT': 'RTSTRUCT', 'MG': 'MG', 'RTDOSE': 'RTDOSE'}
     return modality_map[modality]
+
 
 def process_dicom_series(dicom_files):
     reader = sitk.ImageSeriesReader()
