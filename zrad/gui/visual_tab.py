@@ -6,7 +6,7 @@ from datetime import datetime
 from ..exceptions import DataStructureError, InvalidInputParametersError
 from ..io.dicom import get_all_structure_names, get_dicom_files
 from ..toolbox_logic import close_all_loggers, get_logger
-from ..visualization.mask_visualization import Visualization
+from ..visualization import Visualization
 from ._base_tab import BaseTab, load_images, load_mask
 from .toolbox_gui import (
     CustomCheckBox,
