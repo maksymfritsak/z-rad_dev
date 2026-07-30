@@ -1,1 +1,1 @@
-from .visualization import Visualization as Visualization
+from .mask_visualization import Visualization as Visualization
