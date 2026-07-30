@@ -19,10 +19,10 @@ from PyQt5.QtWidgets import (
 
 from zrad import __version__
 from zrad.gui.filt_tab import FilteringTab
-from zrad.gui.mask_visual_tab import MaskVisualizationTab
 from zrad.gui.prep_tab import PreprocessingTab
 from zrad.gui.rad_tab import RadiomicsTab
 from zrad.gui.toolbox_gui import CustomWarningBox
+from zrad.gui.visual_tab import VisualizationTab
 
 WINDOW_TITLE = f"Z-Rad v{__version__}"
 WINDOW_WIDTH = 1280
@@ -91,7 +91,7 @@ class ZRad(QMainWindow):
             ("Preprocessing", PreprocessingTab()),
             ("Filtering", FilteringTab()),
             ("Radiomics", RadiomicsTab()),
-            ("Visualization", MaskVisualizationTab()),
+            ("Visualization", VisualizationTab()),
         ]
 
         for title, tab in self.tabs:
