@@ -9,7 +9,7 @@ from PyQt5.QtGui import QColor  # noqa: E402
 from PyQt5.QtWidgets import QApplication, QColorDialog, QFileDialog, QInputDialog  # noqa: E402
 
 from zrad.image import Image  # noqa: E402
-from zrad.visualization.visualization import Visualization  # noqa: E402
+from zrad.visualization import Visualization  # noqa: E402
 
 
 @pytest.fixture(scope="module")
