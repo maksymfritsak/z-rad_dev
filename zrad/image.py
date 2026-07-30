@@ -152,8 +152,8 @@ class Image:
         output_path : str or path-like
             Destination file path for the written NIfTI image.
         """
-        if not os.path.exists(os.path.dirname(output_path)):
-            os.makedirs(os.path.dirname(output_path))
+        output_directory = os.path.dirname(os.path.abspath(output_path))
+        os.makedirs(output_directory, exist_ok=True)
         img = sitk.GetImageFromArray(self.array)
         img.SetOrigin(self.origin)
         img.SetSpacing(self.spacing)
