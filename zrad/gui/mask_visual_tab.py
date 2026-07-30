@@ -1,6 +1,6 @@
 """Conflict-free GUI entry point for the interactive mask viewer."""
 
-from ..visualization.interactive_mask_visualization import Visualization
+from ..visualization.mask_canvas import Visualization
 from . import visual_tab
 
 

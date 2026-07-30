@@ -1315,7 +1315,7 @@ class Visualization(QtWidgets.QMainWindow):
             self._fill_connected_area(plane, center)
             self._fill_applied = True
             self._last_draw_point = None
-            self._update_all_views()
+            self._update_edited_mask_overlay()
             return
 
         # The UI specifies the brush diameter. A size of one therefore changes
@@ -1336,7 +1336,7 @@ class Visualization(QtWidgets.QMainWindow):
             brush = (rows - row) ** 2 + (columns - column) ** 2 <= radius**2
             plane[brush] = value
         self._last_draw_point = (view, center)
-        self._update_all_views()
+        self._update_edited_mask_overlay()
 
     @staticmethod
     def _fill_connected_area(plane, center):
@@ -1703,34 +1703,35 @@ class Visualization(QtWidgets.QMainWindow):
         self.cor_img.setImage(cor, autoLevels=False)
         self.axi_img.setImage(axi, autoLevels=False)
 
-        for i, m in enumerate(self.masks):
-            self.sag_mask_items[i].setImage(
-                self._mask_to_rgba(
-                    self._get_sagittal_mask(m["data"], self.current_sagittal),
-                    m["color"],
-                ),
-                autoLevels=False,
-            )
-            self.cor_mask_items[i].setImage(
-                self._mask_to_rgba(
-                    self._get_coronal_mask(m["data"], self.current_coronal),
-                    m["color"],
-                ),
-                autoLevels=False,
-            )
-            self.axi_mask_items[i].setImage(
-                self._mask_to_rgba(
-                    self._get_axial_mask(m["data"], self.current_axial),
-                    m["color"],
-                ),
-                autoLevels=False,
-            )
+        for index in range(len(self.masks)):
+            self._update_mask_overlay(index)
 
         self._apply_item_rects()
         self._apply_mask_visibility()
         self._update_crosshairs()
         self._update_titles()
         self.statusBar().showMessage(self._build_status_text())
+
+    def _update_edited_mask_overlay(self):
+        """Refresh only the edited overlay, avoiding costly image redraws per mouse event."""
+        index = self.active_mask_index
+        if index is not None and 0 <= index < len(self.masks):
+            self._update_mask_overlay(index)
+
+    def _update_mask_overlay(self, index):
+        mask = self.masks[index]
+        self.sag_mask_items[index].setImage(
+            self._mask_to_rgba(self._get_sagittal_mask(mask["data"], self.current_sagittal), mask["color"]),
+            autoLevels=False,
+        )
+        self.cor_mask_items[index].setImage(
+            self._mask_to_rgba(self._get_coronal_mask(mask["data"], self.current_coronal), mask["color"]),
+            autoLevels=False,
+        )
+        self.axi_mask_items[index].setImage(
+            self._mask_to_rgba(self._get_axial_mask(mask["data"], self.current_axial), mask["color"]),
+            autoLevels=False,
+        )
 
     def _on_view_scrolled(self, view, step):
         self._active_slice_view = view

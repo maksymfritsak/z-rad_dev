@@ -10,7 +10,7 @@ from PyQt5.QtGui import QColor, QKeyEvent  # noqa: E402
 from PyQt5.QtWidgets import QApplication, QColorDialog, QFileDialog, QInputDialog  # noqa: E402
 
 from zrad.image import Image  # noqa: E402
-from zrad.visualization.interactive_mask_visualization import Visualization  # noqa: E402
+from zrad.visualization.mask_canvas import Visualization  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -54,6 +54,18 @@ def test_fast_cursor_movement_produces_continuous_line(viewer, monkeypatch):
     viewer._on_view_drawn(viewer.axi_view, 5 * viewer.sx, 2 * viewer.sy)
 
     assert viewer.masks[0]["data"][viewer.current_axial, 2, :].sum() == 6
+
+
+def test_drawing_does_not_redraw_background_images(viewer, monkeypatch):
+    monkeypatch.setattr(QInputDialog, "getText", lambda *args: ("target", True))
+    viewer._create_mask()
+    monkeypatch.setattr(
+        viewer,
+        "_normalize_to_u8",
+        lambda _array: pytest.fail("background image was unnecessarily redrawn"),
+    )
+
+    viewer._on_view_drawn(viewer.axi_view, 2 * viewer.sx, 2 * viewer.sy)
 
 
 def test_fill_bucket_fills_enclosed_area(viewer, monkeypatch):
