@@ -4,6 +4,8 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from ..image import Image
+
 
 class RangeSlider(QtWidgets.QWidget):
     valuesChanged = QtCore.pyqtSignal(int, int)
@@ -209,6 +211,7 @@ class RangeSlider(QtWidgets.QWidget):
 class SliceView(pg.GraphicsLayoutWidget):
     sigScrolled = QtCore.pyqtSignal(object, int)
     sigClicked = QtCore.pyqtSignal(object, float, float)
+    sigDrawn = QtCore.pyqtSignal(object, float, float)
     sigZoomed = QtCore.pyqtSignal(object, float, float, float)
     sigToggleMaximize = QtCore.pyqtSignal(object)
     sigResized = QtCore.pyqtSignal(object)
@@ -231,6 +234,8 @@ class SliceView(pg.GraphicsLayoutWidget):
 
         self._pan_active = False
         self._pan_last_scene_pos = None
+        self.drawing_enabled = False
+        self._drawing_active = False
 
     def wheelEvent(self, ev):
         delta = ev.angleDelta().y()
@@ -266,13 +271,23 @@ class SliceView(pg.GraphicsLayoutWidget):
 
         if ev.button() == QtCore.Qt.LeftButton:
             pos = self.vb.mapSceneToView(ev.pos())
-            self.sigClicked.emit(self, pos.x(), pos.y())
+            if self.drawing_enabled:
+                self._drawing_active = True
+                self.sigDrawn.emit(self, pos.x(), pos.y())
+            else:
+                self.sigClicked.emit(self, pos.x(), pos.y())
             ev.accept()
             return
 
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
+        if self._drawing_active:
+            pos = self.vb.mapSceneToView(ev.pos())
+            self.sigDrawn.emit(self, pos.x(), pos.y())
+            ev.accept()
+            return
+
         if self._pan_active and self._pan_last_scene_pos is not None:
             old_view = self.vb.mapSceneToView(self._pan_last_scene_pos)
             new_view = self.vb.mapSceneToView(ev.pos())
@@ -285,6 +300,10 @@ class SliceView(pg.GraphicsLayoutWidget):
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev):
+        if ev.button() == QtCore.Qt.LeftButton and self._drawing_active:
+            self._drawing_active = False
+            ev.accept()
+            return
         if ev.button() == QtCore.Qt.MiddleButton:
             self._pan_active = False
             self._pan_last_scene_pos = None
@@ -588,6 +607,7 @@ class Visualization(QtWidgets.QMainWindow):
         self.gray_lut[:, 2] = np.arange(256, dtype=np.uint8)
 
         self.volume = None
+        self.current_image = None
         self.masks = []
         self.current_case_name = ""
         self.current_imaging_modality = None
@@ -684,6 +704,73 @@ class Visualization(QtWidgets.QMainWindow):
 
         right_layout.addWidget(window_group, 0)
 
+        mask_group = QtWidgets.QGroupBox("Mask drawing")
+        mask_group.setStyleSheet(
+            """
+            QGroupBox {
+                color: white;
+                border: 1px solid #555;
+                border-radius: 6px;
+                margin-top: 8px;
+                background-color: #222;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+            }
+            QLabel { color: white; }
+            QPushButton {
+                background-color: orange;
+                color: black;
+                border-radius: 6px;
+                padding: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #ffb347; }
+            QPushButton:pressed, QPushButton:checked { background-color: #e69500; }
+            QPushButton:disabled { background-color: #666; color: #222; }
+            QComboBox, QSpinBox {
+                background-color: white;
+                color: black;
+                border: 1px solid #777;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            """
+        )
+        mask_layout = QtWidgets.QHBoxLayout(mask_group)
+        self.mask_selector = QtWidgets.QComboBox()
+        self.mask_selector.setMinimumWidth(140)
+        self.mask_selector.setToolTip("Choose which mask to edit, recolor, clear, or save")
+        self.new_mask_button = QtWidgets.QPushButton("New Mask")
+        self.mask_color_button = QtWidgets.QPushButton("Mask Color")
+        self.draw_button = QtWidgets.QPushButton("Draw")
+        self.draw_button.setCheckable(True)
+        self.erase_button = QtWidgets.QPushButton("Erase")
+        self.erase_button.setCheckable(True)
+        self.brush_size = QtWidgets.QSpinBox()
+        self.brush_size.setRange(1, 51)
+        self.brush_size.setSingleStep(2)
+        self.brush_size.setValue(3)
+        self.brush_size.setSuffix(" voxel")
+        self.brush_size.setToolTip("Brush diameter; 1 paints exactly one voxel")
+        self.clear_mask_button = QtWidgets.QPushButton("Clear")
+        self.save_mask_button = QtWidgets.QPushButton("Save Selected as NIfTI")
+        mask_layout.addWidget(QtWidgets.QLabel("Selected mask:"))
+        mask_layout.addWidget(self.mask_selector)
+        mask_layout.addWidget(self.new_mask_button)
+        mask_layout.addWidget(self.mask_color_button)
+        mask_layout.addWidget(self.draw_button)
+        mask_layout.addWidget(self.erase_button)
+        mask_layout.addWidget(QtWidgets.QLabel("Brush size:"))
+        mask_layout.addWidget(self.brush_size)
+        mask_layout.addWidget(self.clear_mask_button)
+        mask_layout.addStretch(1)
+        mask_layout.addWidget(self.save_mask_button)
+        right_layout.addWidget(mask_group, 0)
+
         button_layout = QtWidgets.QHBoxLayout()
         button_layout.addStretch(1)
 
@@ -735,6 +822,10 @@ class Visualization(QtWidgets.QMainWindow):
         self.cor_view.sigClicked.connect(self._on_view_clicked)
         self.axi_view.sigClicked.connect(self._on_view_clicked)
 
+        self.sag_view.sigDrawn.connect(self._on_view_drawn)
+        self.cor_view.sigDrawn.connect(self._on_view_drawn)
+        self.axi_view.sigDrawn.connect(self._on_view_drawn)
+
         self.sag_view.sigZoomed.connect(self._on_view_zoomed)
         self.cor_view.sigZoomed.connect(self._on_view_zoomed)
         self.axi_view.sigZoomed.connect(self._on_view_zoomed)
@@ -753,6 +844,13 @@ class Visualization(QtWidgets.QMainWindow):
 
         self.window_slider.valuesChanged.connect(self._on_window_slider_changed)
         self.legend_widget.sigMaskToggled.connect(self._on_mask_toggled)
+        self.mask_selector.currentIndexChanged.connect(self._on_mask_selected)
+        self.new_mask_button.clicked.connect(self._create_mask)
+        self.mask_color_button.clicked.connect(self._choose_mask_color)
+        self.draw_button.toggled.connect(self._on_draw_toggled)
+        self.erase_button.toggled.connect(self._on_erase_toggled)
+        self.clear_mask_button.clicked.connect(self._clear_active_mask)
+        self.save_mask_button.clicked.connect(self._save_active_mask)
 
     def _make_gray_item(self):
         item = pg.ImageItem(axisOrder="row-major")
@@ -918,6 +1016,10 @@ class Visualization(QtWidgets.QMainWindow):
         masks = item.get("masks", [])
 
         self.volume = np.asarray(image.array)
+        self.current_image = image
+        self.active_mask_index = None
+        self.draw_button.setChecked(False)
+        self.erase_button.setChecked(False)
         self.current_case_name = item["image_name"]
         self.current_imaging_modality = str(item.get("imaging_modality", "")).strip().upper()
 
@@ -988,6 +1090,7 @@ class Visualization(QtWidgets.QMainWindow):
 
         self._rebuild_mask_items()
         self.legend_widget.set_items(self.masks)
+        self._refresh_mask_selector()
         self._apply_mask_visibility()
 
         self.prev_button.setEnabled(self.current_image_index > 0)
@@ -1001,6 +1104,161 @@ class Visualization(QtWidgets.QMainWindow):
         self._update_all_views()
         QtCore.QTimer.singleShot(0, self._reset_all_view_ranges)
         QtCore.QTimer.singleShot(50, self._reset_all_view_ranges)
+
+    def _create_mask(self):
+        name, accepted = QtWidgets.QInputDialog.getText(self, "New mask", "Mask name:")
+        name = name.strip()
+        if not accepted or not name:
+            return
+        if any(mask["name"] == name for mask in self.masks):
+            QtWidgets.QMessageBox.warning(self, "New mask", f"A mask named '{name}' already exists.")
+            return
+
+        self.masks.append(
+            {
+                "name": name,
+                "data": np.zeros_like(self.volume, dtype=np.uint8),
+                "color": self.mask_colors[len(self.masks) % len(self.mask_colors)],
+                "visible": True,
+                "editable": True,
+            }
+        )
+        self.active_mask_index = len(self.masks) - 1
+        self._rebuild_mask_items()
+        self.legend_widget.set_items(self.masks)
+        self._refresh_mask_selector(self.active_mask_index)
+        self.draw_button.setChecked(True)
+        self._update_all_views()
+
+    def _refresh_mask_selector(self, selected_index=None):
+        if selected_index is None:
+            selected_index = self.active_mask_index
+        blocker = QtCore.QSignalBlocker(self.mask_selector)
+        self.mask_selector.clear()
+        self.mask_selector.addItems([mask["name"] for mask in self.masks])
+        if selected_index is not None and 0 <= selected_index < len(self.masks):
+            self.mask_selector.setCurrentIndex(selected_index)
+            self.active_mask_index = selected_index
+        elif self.masks:
+            self.mask_selector.setCurrentIndex(0)
+            self.active_mask_index = 0
+        else:
+            self.active_mask_index = None
+        del blocker
+        has_masks = bool(self.masks)
+        for widget in (
+            self.mask_selector,
+            self.mask_color_button,
+            self.draw_button,
+            self.erase_button,
+            self.clear_mask_button,
+            self.save_mask_button,
+        ):
+            widget.setEnabled(has_masks)
+
+    def _on_mask_selected(self, index):
+        self.active_mask_index = index if 0 <= index < len(self.masks) else None
+
+    def _choose_mask_color(self):
+        mask = self._editable_mask()
+        if mask is None:
+            return
+        initial = QtGui.QColor(*mask["color"])
+        color = QtWidgets.QColorDialog.getColor(initial, self, "Choose segmentation mask color")
+        if not color.isValid():
+            return
+        mask["color"] = (color.red(), color.green(), color.blue())
+        self._rebuild_mask_items()
+        self.legend_widget.set_items(self.masks)
+        self._update_all_views()
+
+    def _set_drawing_enabled(self, enabled):
+        for view in (self.sag_view, self.cor_view, self.axi_view):
+            view.drawing_enabled = enabled
+            view.setCursor(QtCore.Qt.CrossCursor if enabled else QtCore.Qt.ArrowCursor)
+
+    def _on_draw_toggled(self, checked):
+        if checked:
+            self.erase_button.setChecked(False)
+        self._set_drawing_enabled(checked or self.erase_button.isChecked())
+
+    def _on_erase_toggled(self, checked):
+        if checked:
+            self.draw_button.setChecked(False)
+        self._set_drawing_enabled(checked or self.draw_button.isChecked())
+
+    def _editable_mask(self):
+        index = getattr(self, "active_mask_index", None)
+        if index is None or not (0 <= index < len(self.masks)):
+            return None
+        return self.masks[index]
+
+    def _on_view_drawn(self, view, x_phys, y_phys):
+        mask = self._editable_mask()
+        if mask is None:
+            self.statusBar().showMessage("Create a mask before drawing.", 3000)
+            return
+
+        if view is self.sag_view:
+            center = (
+                self._clip_index((self.nz - 1) - y_phys / self.sz, self.nz - 1),
+                self._clip_index(x_phys / self.sy, self.ny - 1),
+            )
+            plane = mask["data"][:, :, self.current_sagittal]
+        elif view is self.cor_view:
+            center = (
+                self._clip_index((self.nz - 1) - y_phys / self.sz, self.nz - 1),
+                self._clip_index((self.nx - 1) - x_phys / self.sx, self.nx - 1),
+            )
+            plane = mask["data"][:, self.current_coronal, :]
+        else:
+            center = (
+                self._clip_index(y_phys / self.sy, self.ny - 1),
+                self._clip_index((self.nx - 1) - x_phys / self.sx, self.nx - 1),
+            )
+            plane = mask["data"][self.current_axial, :, :]
+
+        # The UI specifies the brush diameter. A size of one therefore changes
+        # only the voxel under the cursor instead of its four neighbours too.
+        radius = (self.brush_size.value() - 1) / 2.0
+        rows, columns = np.ogrid[: plane.shape[0], : plane.shape[1]]
+        brush = (rows - center[0]) ** 2 + (columns - center[1]) ** 2 <= radius**2
+        plane[brush] = 0 if self.erase_button.isChecked() else 1
+        self._update_all_views()
+
+    def _clear_active_mask(self):
+        mask = self._editable_mask()
+        if mask is not None:
+            mask["data"].fill(0)
+            self._update_all_views()
+
+    def _save_active_mask(self):
+        mask = self._editable_mask()
+        if mask is None:
+            QtWidgets.QMessageBox.information(self, "Save mask", "Create a mask before saving.")
+            return
+        suggested_name = f'{mask["name"]}.nii.gz'
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save mask as NIfTI", suggested_name, "NIfTI images (*.nii.gz *.nii)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith((".nii", ".nii.gz")):
+            path += ".nii.gz"
+
+        image = Image(
+            array=mask["data"].astype(np.uint8),
+            origin=self.current_image.origin,
+            spacing=self.current_image.spacing,
+            direction=self.current_image.direction,
+            shape=self.current_image.shape,
+        )
+        try:
+            image.save_as_nifti(path)
+        except (OSError, RuntimeError, ValueError) as error:
+            QtWidgets.QMessageBox.critical(self, "Save mask", f"Could not save mask:\n{error}")
+            return
+        self.statusBar().showMessage(f"Mask saved to {path}", 5000)
 
     def _to_tuple(self, value):
         if value is None:
