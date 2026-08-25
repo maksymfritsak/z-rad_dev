@@ -184,7 +184,12 @@ def get_dicom_files(directory, modality):
             )
 
         dicom_files_info = filtered
-    if modality_dicom in ["CT", "PT", "MR"]:
+    enhanced_pet = any(
+        str(getattr(item["ds"], "SOPClassUID", ""))
+        == "1.2.840.10008.5.1.4.1.1.130"
+        for item in dicom_files_info
+    )
+    if modality_dicom in ["CT", "PT", "MR"] and not enhanced_pet:
         dicom_files_info = remove_duplicate_slices(dicom_files_info)
         dicom_files_info = sort_by_geometric_position(dicom_files_info)
     return dicom_files_info
