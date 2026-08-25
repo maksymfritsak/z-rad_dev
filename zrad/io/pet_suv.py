@@ -73,11 +73,18 @@ def parse_time(time_str):
         "%H%M%S.%f",
         "%H%M%S",
         "%Y%m%d",
+        "%Y%m%d%H%M%S.%f%z",
+        "%Y%m%d%H%M%S%z",
         "%Y%m%d%H%M%S.%f",
         "%Y%m%d%H%M%S",
     ):
         try:
-            return datetime.strptime(time_str, fmt)
+            parsed = datetime.strptime(time_str, fmt)
+            # The PET timing code historically operates on naive datetimes.
+            # DICOM UTC offsets describe the local wall-clock value; discard
+            # only the offset after accepting it so all compared values retain
+            # the same established representation.
+            return parsed.replace(tzinfo=None)
         except (ValueError, TypeError):
             continue
 
