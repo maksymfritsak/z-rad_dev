@@ -10,7 +10,6 @@ from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 
 import zrad.io.dicom as dicom
 from zrad.exceptions import DataStructureError, DataStructureWarning
-from zrad.io.pet_suv import ENHANCED_PET_SOP_CLASS_UID
 
 
 def _make_sitk_image(size=(5, 5, 3)):
@@ -28,7 +27,7 @@ def test_get_dicom_files_does_not_sort_enhanced_pet_by_top_level_geometry(
 ):
     enhanced_pet = Dataset()
     enhanced_pet.Modality = "PT"
-    enhanced_pet.SOPClassUID = ENHANCED_PET_SOP_CLASS_UID
+    enhanced_pet.SOPClassUID = "1.2.840.10008.5.1.4.1.1.130"
 
     class FakeSeriesReader:
         def GetGDCMSeriesIDs(self, directory):
