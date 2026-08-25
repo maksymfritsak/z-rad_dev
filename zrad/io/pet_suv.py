@@ -8,7 +8,6 @@ import SimpleITK as sitk
 
 from ..exceptions import DataStructureError, DataStructureWarning
 
-
 ENHANCED_PET_SOP_CLASS_UID = "1.2.840.10008.5.1.4.1.1.130"
 
 
@@ -88,9 +87,7 @@ def parse_time(time_str):
         except (ValueError, TypeError):
             continue
 
-    raise ValueError(
-        f"Time data '{time_str}' does not match expected formats"
-    )
+    raise ValueError(f"Time data '{time_str}' does not match expected formats")
 
 
 def get_radionuclide_half_life(ds):
@@ -100,14 +97,10 @@ def get_radionuclide_half_life(ds):
     try:
         half_life = float(rph.RadionuclideHalfLife)
     except (AttributeError, TypeError, ValueError):
-        raise DataStructureError(
-            "Radionuclide Half Life (0018,1075) is missing or invalid."
-        )
+        raise DataStructureError("Radionuclide Half Life (0018,1075) is missing or invalid.")
 
     if half_life <= 0:
-        raise DataStructureError(
-            "Radionuclide Half Life (0018,1075) must be > 0."
-        )
+        raise DataStructureError("Radionuclide Half Life (0018,1075) must be > 0.")
 
     return half_life
 
@@ -167,13 +160,9 @@ def get_decay_correction_reference_datetime(ds, acquisition_time, decay_constant
 
     frame_reference_time = float(ds.FrameReferenceTime) / 1000.0
     decay_during_frame = decay_constant * float(ds.ActualFrameDuration) / 1000.0
-    avg_count_rate_time = (1 / decay_constant) * np.log(
-        decay_during_frame / (1 - np.exp(-decay_during_frame))
-    )
+    avg_count_rate_time = (1 / decay_constant) * np.log(decay_during_frame / (1 - np.exp(-decay_during_frame)))
 
-    return acquisition_time + timedelta(
-        seconds=avg_count_rate_time - frame_reference_time
-    )
+    return acquisition_time + timedelta(seconds=avg_count_rate_time - frame_reference_time)
 
 
 def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
@@ -193,12 +182,8 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
     """
     rph = ds.RadiopharmaceuticalInformationSequence[0]
 
-    injection_datetime_value = getattr(
-        rph, "RadiopharmaceuticalStartDateTime", None
-    )
-    injection_time_value = getattr(
-        rph, "RadiopharmaceuticalStartTime", None
-    )
+    injection_datetime_value = getattr(rph, "RadiopharmaceuticalStartDateTime", None)
+    injection_time_value = getattr(rph, "RadiopharmaceuticalStartTime", None)
     acquisition_date_value = getattr(ds, "AcquisitionDate", None)
 
     injection_datetime_present = injection_datetime_value not in [None, ""]
@@ -216,9 +201,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
         try:
             injection_datetime = parse_time(injection_datetime_value)
         except (ValueError, TypeError):
-            raise DataStructureError(
-                "Radiopharmaceutical Start DateTime (0018,1078) is invalid."
-            )
+            raise DataStructureError("Radiopharmaceutical Start DateTime (0018,1078) is invalid.")
 
     if injection_time_present:
         injection_clock = parse_time(injection_time_value)
@@ -270,9 +253,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
             decay_constant,
         )
 
-        datetime_offset = (
-            decay_reference_time - injection_datetime
-        ).total_seconds()
+        datetime_offset = (decay_reference_time - injection_datetime).total_seconds()
 
         if -3600 <= datetime_offset < 2 * half_life:
             return injection_datetime, acquisition_time
@@ -306,9 +287,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
         if injection_time.time() > acquisition_time.time():
             acquisition_time += timedelta(days=1)
 
-            if (
-                acquisition_time - injection_time
-            ).total_seconds() >= 6 * 3600:
+            if (acquisition_time - injection_time).total_seconds() >= 6 * 3600:
                 raise DataStructureError(
                     "Injection time is later than acquisition time, but "
                     "assuming a midnight rollover results in a time difference "
@@ -335,9 +314,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
         if injection_time.time() > acquisition_time.time():
             injection_time -= timedelta(days=1)
 
-            if (
-                acquisition_time - injection_time
-            ).total_seconds() >= 6 * 3600:
+            if (acquisition_time - injection_time).total_seconds() >= 6 * 3600:
                 raise DataStructureError(
                     "Injection time is later than acquisition time while the "
                     "injection date is missing, but assuming injection on the "
@@ -352,9 +329,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
     if injection_time.time() > acquisition_time.time():
         injection_time -= timedelta(days=1)
 
-        if (
-            acquisition_time - injection_time
-        ).total_seconds() >= 6 * 3600:
+        if (acquisition_time - injection_time).total_seconds() >= 6 * 3600:
             raise DataStructureError(
                 "Injection time is later than acquisition time while both dates "
                 "are missing, but assuming injection on the previous day results "
@@ -582,24 +557,18 @@ def _enhanced_mapping_kind(mapping):
 
 
 def _mapping_has_values(mapping):
-    return (
-        hasattr(mapping, "RealWorldValueLUTData")
-        or (
-            hasattr(mapping, "RealWorldValueSlope")
-            and hasattr(mapping, "RealWorldValueIntercept")
-        )
+    return hasattr(mapping, "RealWorldValueLUTData") or (
+        hasattr(mapping, "RealWorldValueSlope") and hasattr(mapping, "RealWorldValueIntercept")
     )
 
 
 def _select_enhanced_mapping(ds, frame_index):
-    sequence = _sequence_from_groups(
-        ds, frame_index, "RealWorldValueMappingSequence"
+    sequence = _sequence_from_groups(ds, frame_index, "RealWorldValueMappingSequence")
+    candidates = (
+        []
+        if sequence is None
+        else [(item, _enhanced_mapping_kind(item)) for item in sequence if _mapping_has_values(item)]
     )
-    candidates = [] if sequence is None else [
-        (item, _enhanced_mapping_kind(item))
-        for item in sequence
-        if _mapping_has_values(item)
-    ]
     priorities = ("BW", "BSA", "LBM", "LBMJAMES128", "LBMJANMA", "BQML")
     for kind in priorities:
         for mapping, candidate_kind in candidates:
@@ -664,15 +633,11 @@ def _enhanced_suv_factor(ds, kind):
 
 
 def _enhanced_decay_reference(ds, frame_index, half_life):
-    corrected = str(
-        _attribute_from_groups(ds, frame_index, "DecayCorrected", "")
-    ).strip().upper()
+    corrected = str(_attribute_from_groups(ds, frame_index, "DecayCorrected", "")).strip().upper()
     if corrected not in {"YES", "NO"}:
         raise DataStructureError("Decay Corrected (0018,9758) must be YES or NO.")
     if corrected == "YES":
-        value = _attribute_from_groups(
-            ds, frame_index, "DecayCorrectionDateTime"
-        )
+        value = _attribute_from_groups(ds, frame_index, "DecayCorrectionDateTime")
         if value in [None, ""]:
             raise DataStructureError("Decay Correction DateTime (0018,9701) is required.")
         return parse_time(value)
@@ -683,9 +648,7 @@ def _enhanced_decay_reference(ds, frame_index, half_life):
     acquisition = _attribute_from_groups(ds, frame_index, "FrameAcquisitionDateTime")
     duration = _attribute_from_groups(ds, frame_index, "FrameAcquisitionDuration")
     if acquisition in [None, ""] or duration in [None, ""]:
-        raise DataStructureError(
-            "Frame Reference DateTime or frame acquisition datetime and duration are required."
-        )
+        raise DataStructureError("Frame Reference DateTime or frame acquisition datetime and duration are required.")
     duration_seconds = float(duration) / 1000.0
     if duration_seconds < 0:
         raise DataStructureError("Frame Acquisition Duration must be non-negative.")
@@ -715,9 +678,7 @@ def _enhanced_injection_datetime(ds, reference, half_life):
     if half_life >= 41400:
         raise DataStructureError("Administration datetime is inconsistent for a long-lived radionuclide.")
     injection = injection.replace(year=reference.year, month=reference.month, day=reference.day)
-    clock_offset = (
-        datetime.combine(reference.date(), reference.time()) - injection
-    ).total_seconds()
+    clock_offset = (datetime.combine(reference.date(), reference.time()) - injection).total_seconds()
     if clock_offset < -3600:
         injection -= timedelta(days=1)
     return injection
@@ -808,12 +769,12 @@ def validate_pet_dicom_tags(dicom_files):
                 ):
                     try:
                         elapsed_time = (
-                                parse_time(ds[(0x0071, 0x1022)].value).replace(
-                                    year=acquisition_time.year,
-                                    month=acquisition_time.month,
-                                    day=acquisition_time.day,
-                                )
-                                - injection_time
+                            parse_time(ds[(0x0071, 0x1022)].value).replace(
+                                year=acquisition_time.year,
+                                month=acquisition_time.month,
+                                day=acquisition_time.day,
+                            )
+                            - injection_time
                         ).total_seconds()
 
                     except (KeyError, TypeError):
@@ -826,12 +787,12 @@ def validate_pet_dicom_tags(dicom_files):
                 elif "GE" in ds.Manufacturer.upper():
                     try:
                         elapsed_time = (
-                                parse_time(ds[(0x0009, 0x100D)].value).replace(
-                                    year=acquisition_time.year,
-                                    month=acquisition_time.month,
-                                    day=acquisition_time.day,
-                                )
-                                - injection_time
+                            parse_time(ds[(0x0009, 0x100D)].value).replace(
+                                year=acquisition_time.year,
+                                month=acquisition_time.month,
+                                day=acquisition_time.day,
+                            )
+                            - injection_time
                         ).total_seconds()
 
                     except (KeyError, TypeError):

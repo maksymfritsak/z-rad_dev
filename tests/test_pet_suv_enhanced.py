@@ -59,9 +59,7 @@ def test_enhanced_pet_uses_per_frame_real_world_value_slopes():
         ("NO", "FrameReferenceDateTime", 1000.0),
     ],
 )
-def test_enhanced_pet_bqml_uses_decay_reference_datetime(
-    decay_corrected, reference_keyword, expected
-):
+def test_enhanced_pet_bqml_uses_decay_reference_datetime(decay_corrected, reference_keyword, expected):
     ds = _enhanced_pet([[[1000]]])
     ds.PatientWeight = 50
     ds.DecayCorrected = decay_corrected

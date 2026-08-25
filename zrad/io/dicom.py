@@ -21,8 +21,7 @@ def read_dicom_image(dicom_dir, modality):
     enhanced_pet = (
         modality == "PET"
         and len(dicom_files) == 1
-        and str(getattr(dicom_files[0]["ds"], "SOPClassUID", ""))
-        == "1.2.840.10008.5.1.4.1.1.130"
+        and str(getattr(dicom_files[0]["ds"], "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.130"
     )
     if modality in ["CT", "MRI", "PET"] and not enhanced_pet:
         validate_z_spacing(dicom_files)
@@ -185,9 +184,7 @@ def get_dicom_files(directory, modality):
 
         dicom_files_info = filtered
     enhanced_pet = any(
-        str(getattr(item["ds"], "SOPClassUID", ""))
-        == "1.2.840.10008.5.1.4.1.1.130"
-        for item in dicom_files_info
+        str(getattr(item["ds"], "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.130" for item in dicom_files_info
     )
     if modality_dicom in ["CT", "PT", "MR"] and not enhanced_pet:
         dicom_files_info = remove_duplicate_slices(dicom_files_info)
@@ -244,8 +241,7 @@ def process_dicom_series(dicom_files, modality):
     enhanced_pet = (
         modality == "PET"
         and len(dicom_files) == 1
-        and str(getattr(dicom_files[0]["ds"], "SOPClassUID", ""))
-        == "1.2.840.10008.5.1.4.1.1.130"
+        and str(getattr(dicom_files[0]["ds"], "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.130"
     )
     if enhanced_pet:
         # Enhanced PET is a single multi-frame object.  GDCM obtains its

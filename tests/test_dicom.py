@@ -22,9 +22,7 @@ def _make_sitk_image(size=(5, 5, 3)):
 
 
 @pytest.mark.unit
-def test_get_dicom_files_does_not_sort_enhanced_pet_by_top_level_geometry(
-    monkeypatch, tmp_path
-):
+def test_get_dicom_files_does_not_sort_enhanced_pet_by_top_level_geometry(monkeypatch, tmp_path):
     enhanced_pet = Dataset()
     enhanced_pet.Modality = "PT"
     enhanced_pet.SOPClassUID = "1.2.840.10008.5.1.4.1.1.130"
