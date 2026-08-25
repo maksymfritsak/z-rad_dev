@@ -11,6 +11,13 @@ from ..exceptions import DataStructureError, DataStructureWarning
 from .pet_suv import apply_suv_correction, validate_pet_dicom_tags
 
 
+ENHANCED_PET_SOP_CLASS_UID = "1.2.840.10008.5.1.4.1.1.130"
+
+
+def _is_enhanced_pet(ds):
+    return str(getattr(ds, "SOPClassUID", "")) == ENHANCED_PET_SOP_CLASS_UID
+
+
 def read_dicom_image(dicom_dir, modality):
     """Read a DICOM image series as a SimpleITK image."""
     dicom_files = get_dicom_files(directory=dicom_dir, modality=modality)
@@ -18,7 +25,12 @@ def read_dicom_image(dicom_dir, modality):
         raise DataStructureError(f"No {modality} data found in {dicom_dir}. Patient skipped.")
 
     image = None
-    if modality in ["CT", "MRI", "PET"]:
+    enhanced_pet = (
+        modality == "PET"
+        and len(dicom_files) == 1
+        and _is_enhanced_pet(dicom_files[0]["ds"])
+    )
+    if modality in ["CT", "MRI", "PET"] and not enhanced_pet:
         validate_z_spacing(dicom_files)
     if modality == "US":
         validate_ultrasound_dicom_tags(dicom_files)
@@ -178,7 +190,8 @@ def get_dicom_files(directory, modality):
             )
 
         dicom_files_info = filtered
-    if modality_dicom in ["CT", "PT", "MR"]:
+    enhanced_pet = any(_is_enhanced_pet(item["ds"]) for item in dicom_files_info)
+    if modality_dicom in ["CT", "PT", "MR"] and not enhanced_pet:
         dicom_files_info = remove_duplicate_slices(dicom_files_info)
         dicom_files_info = sort_by_geometric_position(dicom_files_info)
     return dicom_files_info
@@ -230,6 +243,18 @@ def modality_mapping(modality):
 
 
 def process_dicom_series(dicom_files, modality):
+    enhanced_pet = (
+        modality == "PET"
+        and len(dicom_files) == 1
+        and _is_enhanced_pet(dicom_files[0]["ds"])
+    )
+    if enhanced_pet:
+        # Enhanced PET is a single multi-frame object.  GDCM obtains its
+        # geometry from the functional groups; the classic-series code below
+        # expects top-level, one-frame geometry attributes and must not replace
+        # it.
+        return sitk.ReadImage(dicom_files[0]["file_path"])
+
     if modality in ["CT", "MRI", "PET", "MG"]:
         reader = sitk.ImageSeriesReader()
         file_names = [i["file_path"] for i in dicom_files]
