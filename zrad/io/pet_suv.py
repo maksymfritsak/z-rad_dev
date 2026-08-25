@@ -1,6 +1,6 @@
 import re
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pydicom
@@ -18,18 +18,298 @@ def is_fdg(name):
 
 
 def parse_time(time_str):
-    """Parse a DICOM time string into a datetime object."""
+    """Parse a DICOM date, time, or datetime string into a datetime object."""
     if isinstance(time_str, bytes):
         time_str = time_str.decode("utf-8").strip()
 
-    for fmt in ("%H%M%S.%f", "%H%M%S", "%Y%m%d%H%M%S.%f", "%Y%m%d%H%M%S"):
+    time_str = str(time_str).strip()
+
+    for fmt in (
+        "%H%M%S.%f",
+        "%H%M%S",
+        "%Y%m%d",
+        "%Y%m%d%H%M%S.%f",
+        "%Y%m%d%H%M%S",
+    ):
         try:
             return datetime.strptime(time_str, fmt)
-        except ValueError:
+        except (ValueError, TypeError):
             continue
-        except TypeError:
-            continue
-    raise ValueError(f"Time data '{time_str}' does not match expected formats")
+
+    raise ValueError(
+        f"Time data '{time_str}' does not match expected formats"
+    )
+
+
+def get_radionuclide_half_life(ds):
+    """Return radionuclide half-life in seconds."""
+    rph = ds.RadiopharmaceuticalInformationSequence[0]
+
+    try:
+        half_life = float(rph.RadionuclideHalfLife)
+    except (AttributeError, TypeError, ValueError):
+        raise DataStructureError(
+            "Radionuclide Half Life (0018,1075) is missing or invalid."
+        )
+
+    if half_life <= 0:
+        raise DataStructureError(
+            "Radionuclide Half Life (0018,1075) must be > 0."
+        )
+
+    return half_life
+
+
+def get_decay_correction_reference_datetime(ds, acquisition_time, decay_constant):
+    """
+    Return the datetime to which the PET activity is decay-corrected.
+
+    This mirrors the existing vendor-specific START decay-correction logic and
+    is used only to determine whether RadiopharmaceuticalStartDateTime has a
+    plausible date offset.
+    """
+    if ds.DecayCorrection != "START":
+        return acquisition_time
+
+    manufacturer = ds.Manufacturer.upper()
+
+    series_time = None
+    try:
+        series_date_value = getattr(ds, "SeriesDate", None)
+        if series_date_value not in [None, ""]:
+            series_date = parse_time(series_date_value)
+        else:
+            series_date = acquisition_time
+
+        series_time = parse_time(ds.SeriesTime).replace(
+            year=series_date.year,
+            month=series_date.month,
+            day=series_date.day,
+        )
+    except (AttributeError, ValueError, TypeError):
+        pass
+
+    if series_time is not None and acquisition_time == series_time:
+        return acquisition_time
+
+    if "SIEMENS" in manufacturer or "CPS" in manufacturer or "CTI" in manufacturer:
+        try:
+            return parse_time(ds[(0x0071, 0x1022)].value).replace(
+                year=acquisition_time.year,
+                month=acquisition_time.month,
+                day=acquisition_time.day,
+            )
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    if "GE" in manufacturer:
+        try:
+            return parse_time(ds[(0x0009, 0x100D)].value).replace(
+                year=acquisition_time.year,
+                month=acquisition_time.month,
+                day=acquisition_time.day,
+            )
+        except (KeyError, TypeError, ValueError):
+            frame_reference_time = float(ds.FrameReferenceTime) / 1000.0
+            return acquisition_time - timedelta(seconds=frame_reference_time)
+
+    frame_reference_time = float(ds.FrameReferenceTime) / 1000.0
+    decay_during_frame = decay_constant * float(ds.ActualFrameDuration) / 1000.0
+    avg_count_rate_time = (1 / decay_constant) * np.log(
+        decay_during_frame / (1 - np.exp(-decay_during_frame))
+    )
+
+    return acquisition_time + timedelta(
+        seconds=avg_count_rate_time - frame_reference_time
+    )
+
+
+def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
+    """
+    Resolve injection and acquisition datetimes.
+
+    A complete RadiopharmaceuticalStartDateTime is trusted only when its offset
+    to the decay-correction reference datetime is >= -1 hour and < 2 half-lives.
+
+    For short-lived radionuclides, unreliable or missing dates can be replaced
+    by a time-based inference. If injection time is later than acquisition time,
+    injection is assumed to have occurred on the previous day, but only when
+    the resulting difference is < 6 hours.
+
+    For long-lived radionuclides, dates must be trustworthy because uptake may
+    legitimately span more than one day.
+    """
+    rph = ds.RadiopharmaceuticalInformationSequence[0]
+
+    injection_datetime_value = getattr(
+        rph, "RadiopharmaceuticalStartDateTime", None
+    )
+    injection_time_value = getattr(
+        rph, "RadiopharmaceuticalStartTime", None
+    )
+    acquisition_date_value = getattr(ds, "AcquisitionDate", None)
+
+    injection_datetime_present = injection_datetime_value not in [None, ""]
+    injection_time_present = injection_time_value not in [None, ""]
+    acquisition_date_present = acquisition_date_value not in [None, ""]
+
+    if not injection_datetime_present and not injection_time_present:
+        raise DataStructureError(
+            "Both Radiopharmaceutical Start DateTime (0018,1078) and "
+            "Radiopharmaceutical Start Time (0018,1072) are missing."
+        )
+
+    injection_datetime = None
+    if injection_datetime_present:
+        try:
+            injection_datetime = parse_time(injection_datetime_value)
+        except (ValueError, TypeError):
+            raise DataStructureError(
+                "Radiopharmaceutical Start DateTime (0018,1078) is invalid."
+            )
+
+    if injection_time_present:
+        injection_clock = parse_time(injection_time_value)
+    else:
+        injection_clock = injection_datetime
+
+    acquisition_clock = parse_time(ds.AcquisitionTime)
+
+    # According to the DRO recommendations, long-lived radionuclides require
+    # a reliable full administration datetime because uptake can exceed 24 h.
+    long_lived_radionuclide = half_life >= 41400
+
+    if not injection_datetime_present and long_lived_radionuclide:
+        raise DataStructureError(
+            "Radiopharmaceutical Start DateTime (0018,1078) is required "
+            "for a long-lived radionuclide because the uptake time may span "
+            "more than one day."
+        )
+
+    if acquisition_date_present:
+        acquisition_date = parse_time(acquisition_date_value)
+        acquisition_time = acquisition_clock.replace(
+            year=acquisition_date.year,
+            month=acquisition_date.month,
+            day=acquisition_date.day,
+        )
+    else:
+        if long_lived_radionuclide:
+            raise DataStructureError(
+                "Acquisition Date is missing for a long-lived radionuclide. "
+                "The uptake time cannot be determined reliably."
+            )
+
+        if injection_datetime is not None:
+            acquisition_time = acquisition_clock.replace(
+                year=injection_datetime.year,
+                month=injection_datetime.month,
+                day=injection_datetime.day,
+            )
+        else:
+            acquisition_time = acquisition_clock
+
+    # If both complete dates are present, determine whether they are mutually
+    # plausible using the actual decay-correction reference datetime.
+    if injection_datetime is not None and acquisition_date_present:
+        decay_reference_time = get_decay_correction_reference_datetime(
+            ds,
+            acquisition_time,
+            decay_constant,
+        )
+
+        datetime_offset = (
+            decay_reference_time - injection_datetime
+        ).total_seconds()
+
+        if -3600 <= datetime_offset < 2 * half_life:
+            return injection_datetime, acquisition_time
+
+        # An implausible full datetime for a long-lived radionuclide cannot
+        # safely be repaired from clock times (DRO_error_4_2).
+        if long_lived_radionuclide:
+            raise DataStructureError(
+                "Radiopharmaceutical Start DateTime is inconsistent with the "
+                "decay-correction reference datetime for a long-lived "
+                "radionuclide. The administration date may have been anonymized "
+                "or shifted and cannot be inferred safely."
+            )
+
+    # From here on, the radionuclide is short-lived and either one date is
+    # missing or the complete datetime offset was implausible. Ignore the
+    # unreliable date offset and reconstruct only the relative day relationship.
+    if injection_datetime is not None:
+        injection_time = injection_clock.replace(
+            year=injection_datetime.year,
+            month=injection_datetime.month,
+            day=injection_datetime.day,
+        )
+
+        acquisition_time = acquisition_clock.replace(
+            year=injection_datetime.year,
+            month=injection_datetime.month,
+            day=injection_datetime.day,
+        )
+
+        if injection_time.time() > acquisition_time.time():
+            acquisition_time += timedelta(days=1)
+
+            if (
+                acquisition_time - injection_time
+            ).total_seconds() >= 6 * 3600:
+                raise DataStructureError(
+                    "Injection time is later than acquisition time, but "
+                    "assuming a midnight rollover results in a time difference "
+                    "of 6 hours or more."
+                )
+
+        return injection_time, acquisition_time
+
+    if acquisition_date_present:
+        acquisition_date = parse_time(acquisition_date_value)
+
+        acquisition_time = acquisition_clock.replace(
+            year=acquisition_date.year,
+            month=acquisition_date.month,
+            day=acquisition_date.day,
+        )
+
+        injection_time = injection_clock.replace(
+            year=acquisition_date.year,
+            month=acquisition_date.month,
+            day=acquisition_date.day,
+        )
+
+        if injection_time.time() > acquisition_time.time():
+            injection_time -= timedelta(days=1)
+
+            if (
+                acquisition_time - injection_time
+            ).total_seconds() >= 6 * 3600:
+                raise DataStructureError(
+                    "Injection time is later than acquisition time while the "
+                    "injection date is missing, but assuming injection on the "
+                    "previous day results in a time difference of 6 hours or more."
+                )
+
+        return injection_time, acquisition_time
+
+    injection_time = injection_clock
+    acquisition_time = acquisition_clock
+
+    if injection_time.time() > acquisition_time.time():
+        injection_time -= timedelta(days=1)
+
+        if (
+            acquisition_time - injection_time
+        ).total_seconds() >= 6 * 3600:
+            raise DataStructureError(
+                "Injection time is later than acquisition time while both dates "
+                "are missing, but assuming injection on the previous day results "
+                "in a time difference of 6 hours or more."
+            )
+
+    return injection_time, acquisition_time
 
 
 def calc_elapsed_time(ds, decay_constant, acquisition_time, injection_time):
@@ -227,26 +507,25 @@ def validate_pet_dicom_tags(dicom_files):
         if "DECY" not in ds[(0x0028, 0x0051)].value or "ATTN" not in ds[(0x0028, 0x0051)].value:
             warning_msg = f"For patient's {image_id} image, in DICOM tag (0028, 0051) either no 'DECY' (decay correction) or 'ATTN' (attenuation correction). Patient is excluded from the analysis."
             warnings.warn(warning_msg, DataStructureWarning)
-
         if ds.Units == "BQML":
-            try:
-                injection_time = parse_time(ds.RadiopharmaceuticalInformationSequence[0].RadiopharmaceuticalStartTime)
-            except AttributeError:
-                injection_time = parse_time(
-                    ds.RadiopharmaceuticalInformationSequence[0].RadiopharmaceuticalStartDateTime
-                )
-            half_life = float(ds.RadiopharmaceuticalInformationSequence[0].RadionuclideHalfLife)
+            half_life = get_radionuclide_half_life(ds)
             decay_constant = np.log(2) / half_life
+
+            if ds.DecayCorrection != "ADMIN":
+                injection_time, acquisition_time = resolve_injection_and_acquisition_times(
+                    ds,
+                    half_life,
+                    decay_constant,
+                )
 
             if ds.DecayCorrection == "START":
                 if "PHILIPS" in ds.Manufacturer.upper():
-                    acquisition_time = parse_time(ds.AcquisitionTime).replace(
-                        year=injection_time.year,
-                        month=injection_time.month,
-                        day=injection_time.day,
+                    elapsed_time = calc_elapsed_time(
+                        ds,
+                        decay_constant,
+                        acquisition_time,
+                        injection_time,
                     )
-
-                    elapsed_time = calc_elapsed_time(ds, decay_constant, acquisition_time, injection_time)
                 elif (
                     "SIEMENS" in ds.Manufacturer.upper()
                     or "CPS" in ds.Manufacturer.upper()
@@ -254,49 +533,43 @@ def validate_pet_dicom_tags(dicom_files):
                 ):
                     try:
                         elapsed_time = (
-                            parse_time(ds[(0x0071, 0x1022)].value).replace(
-                                year=injection_time.year,
-                                month=injection_time.month,
-                                day=injection_time.day,
-                            )
-                            - injection_time
+                                parse_time(ds[(0x0071, 0x1022)].value).replace(
+                                    year=acquisition_time.year,
+                                    month=acquisition_time.month,
+                                    day=acquisition_time.day,
+                                )
+                                - injection_time
                         ).total_seconds()
 
                     except (KeyError, TypeError):
-                        acquisition_time = parse_time(ds.AcquisitionTime).replace(
-                            year=injection_time.year,
-                            month=injection_time.month,
-                            day=injection_time.day,
+                        elapsed_time = calc_elapsed_time(
+                            ds,
+                            decay_constant,
+                            acquisition_time,
+                            injection_time,
                         )
-
-                        elapsed_time = calc_elapsed_time(ds, decay_constant, acquisition_time, injection_time)
                 elif "GE" in ds.Manufacturer.upper():
                     try:
                         elapsed_time = (
-                            parse_time(ds[(0x0009, 0x100D)].value).replace(
-                                year=injection_time.year,
-                                month=injection_time.month,
-                                day=injection_time.day,
-                            )
-                            - injection_time
+                                parse_time(ds[(0x0009, 0x100D)].value).replace(
+                                    year=acquisition_time.year,
+                                    month=acquisition_time.month,
+                                    day=acquisition_time.day,
+                                )
+                                - injection_time
                         ).total_seconds()
+
                     except (KeyError, TypeError):
-                        acquisition_time = parse_time(ds.AcquisitionTime).replace(
-                            year=injection_time.year,
-                            month=injection_time.month,
-                            day=injection_time.day,
-                        )
                         frame_reference_time = float(ds.FrameReferenceTime) / 1000
 
                         elapsed_time = (acquisition_time - injection_time).total_seconds() - frame_reference_time
                 else:
-                    acquisition_time = parse_time(ds.AcquisitionTime).replace(
-                        year=injection_time.year,
-                        month=injection_time.month,
-                        day=injection_time.day,
+                    elapsed_time = calc_elapsed_time(
+                        ds,
+                        decay_constant,
+                        acquisition_time,
+                        injection_time,
                     )
-
-                    elapsed_time = calc_elapsed_time(ds, decay_constant, acquisition_time, injection_time)
 
                     warning_msg = f"For patient's {image_id} image, an unknown PET scaner manufacturer is present {ds.Manufacturer}. Siemens/Philips strategy is applied."
                     warnings.warn(warning_msg, DataStructureWarning)
@@ -359,31 +632,31 @@ def apply_suv_correction(dicom_files, suv_image):
     def process_single_slice(dicom_file_path):
         ds = pydicom.dcmread(dicom_file_path)
 
-        def get_injection_time(ds):
-            rph = ds.RadiopharmaceuticalInformationSequence[0]
-            try:
-                return parse_time(rph.RadiopharmaceuticalStartTime)
-            except AttributeError:
-                return parse_time(rph.RadiopharmaceuticalStartDateTime)
-
         def get_tracer_name(rph_item):
             value = getattr(rph_item, "Radiopharmaceutical", None)
             if value is None and (0x0018, 0x0031) in rph_item:
                 value = rph_item[(0x0018, 0x0031)].value
             return str(value) if value is not None else None
 
-        def get_datetime_on_injection_day(time_value, injection_time):
+        def get_datetime_on_acquisition_day(time_value, acquisition_time):
             return parse_time(time_value).replace(
-                year=injection_time.year,
-                month=injection_time.month,
-                day=injection_time.day,
+                year=acquisition_time.year,
+                month=acquisition_time.month,
+                day=acquisition_time.day,
             )
 
-        def compute_elapsed_time_for_start_decay_correction(ds, injection_time, decay_constant):
+        def compute_elapsed_time_for_start_decay_correction(
+            ds,
+            injection_time,
+            acquisition_time,
+            decay_constant,
+        ):
             manufacturer = ds.Manufacturer.upper()
 
-            acquisition_time = get_datetime_on_injection_day(ds.AcquisitionTime, injection_time)
-            series_time = get_datetime_on_injection_day(ds.SeriesTime, injection_time)
+            series_time = get_datetime_on_acquisition_day(
+                ds.SeriesTime,
+                acquisition_time,
+            )
 
             if "PHILIPS" in manufacturer:
                 if acquisition_time == series_time:
@@ -392,7 +665,10 @@ def apply_suv_correction(dicom_files, suv_image):
 
             if "SIEMENS" in manufacturer or "CPS" in manufacturer or "CTI" in manufacturer:
                 try:
-                    private_time = get_datetime_on_injection_day(ds[(0x0071, 0x1022)].value, injection_time)
+                    private_time = get_datetime_on_acquisition_day(
+                        ds[(0x0071, 0x1022)].value,
+                        acquisition_time,
+                    )
                     return (private_time - injection_time).total_seconds()
                 except (KeyError, TypeError):
                     if acquisition_time == series_time:
@@ -401,7 +677,10 @@ def apply_suv_correction(dicom_files, suv_image):
 
             if "GE" in manufacturer:
                 try:
-                    private_time = get_datetime_on_injection_day(ds[(0x0009, 0x100D)].value, injection_time)
+                    private_time = get_datetime_on_acquisition_day(
+                        ds[(0x0009, 0x100D)].value,
+                        acquisition_time,
+                    )
                     return (private_time - injection_time).total_seconds()
                 except (KeyError, TypeError):
                     if acquisition_time == series_time:
@@ -435,7 +714,6 @@ def apply_suv_correction(dicom_files, suv_image):
 
         def process_bqml(activity_concentration, ds):
             rph = ds.RadiopharmaceuticalInformationSequence[0]
-            injection_time = get_injection_time(ds)
             patient_weight = float(ds.PatientWeight)
             injected_dose = float(rph.RadionuclideTotalDose)
 
@@ -450,22 +728,31 @@ def apply_suv_correction(dicom_files, suv_image):
             if injected_dose <= 0:
                 raise DataStructureError("The injected PET tracer dose is zero.")
 
-            half_life = float(rph.RadionuclideHalfLife)
+            half_life = get_radionuclide_half_life(ds)
             decay_constant = np.log(2) / half_life
             decay_correction = ds.DecayCorrection
-
-            if decay_correction == "START":
-                elapsed_time = compute_elapsed_time_for_start_decay_correction(ds, injection_time, decay_constant)
-                decay_factor = np.exp(-(np.log(2) * elapsed_time) / half_life)
-                decay_corrected_dose = injected_dose * decay_factor
-                return activity_concentration / (decay_corrected_dose / (patient_weight * 1000))
 
             if decay_correction == "ADMIN":
                 return activity_concentration / (injected_dose / (patient_weight * 1000))
 
-            if decay_correction == "NONE":
-                acquisition_time = get_datetime_on_injection_day(ds.AcquisitionTime, injection_time)
+            injection_time, acquisition_time = resolve_injection_and_acquisition_times(
+                ds,
+                half_life,
+                decay_constant,
+            )
 
+            if decay_correction == "START":
+                elapsed_time = compute_elapsed_time_for_start_decay_correction(
+                    ds,
+                    injection_time,
+                    acquisition_time,
+                    decay_constant,
+                )
+                decay_factor = np.exp(-(np.log(2) * elapsed_time) / half_life)
+                decay_corrected_dose = injected_dose * decay_factor
+                return activity_concentration / (decay_corrected_dose / (patient_weight * 1000))
+
+            if decay_correction == "NONE":
                 decay_during_frame = decay_constant * float(ds.ActualFrameDuration) / 1000.0
                 avg_count_rate_time = (1 / decay_constant) * np.log(
                     decay_during_frame / (1 - np.exp(-decay_during_frame))
