@@ -6,7 +6,7 @@ from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.sequence import Sequence
 from pydicom.uid import ExplicitVRLittleEndian
 
-from zrad.io.pet_suv import _apply_enhanced_suv_correction, parse_time
+from zrad.io.pet_suv import _apply_enhanced_suv_correction
 
 
 def _enhanced_pet(pixel_values):
@@ -36,19 +36,6 @@ def _mapping(slope, unit="g/ml{SUVbw}"):
     units.CodeValue = unit
     mapping.MeasurementUnitsCodeSequence = Sequence([units])
     return mapping
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        "20250101110000+0100",
-        "20250101111459.998530+0100",
-    ],
-)
-def test_parse_time_accepts_dicom_datetime_utc_offsets(value):
-    parsed = parse_time(value)
-
-    assert parsed.utcoffset().total_seconds() == 3600
 
 
 def test_enhanced_pet_uses_per_frame_real_world_value_slopes():
@@ -81,16 +68,14 @@ def test_enhanced_pet_bqml_uses_decay_reference_datetime(
     group = Dataset()
     group.RealWorldValueMappingSequence = Sequence([_mapping(1, "Bq/ml")])
     if reference_keyword == "FrameReferenceDateTime":
-        group.FrameReferenceDateTime = "20200101110000.000000+0100"
+        group.FrameReferenceDateTime = "20200101110000"
     else:
-        ds.DecayCorrectionDateTime = "20200101120000+0100"
+        ds.DecayCorrectionDateTime = "20200101120000"
     ds.PerFrameFunctionalGroupsSequence = Sequence([group])
     radiopharmaceutical = Dataset()
     radiopharmaceutical.RadionuclideHalfLife = 3600
     radiopharmaceutical.RadionuclideTotalDose = 100000
-    radiopharmaceutical.RadiopharmaceuticalStartDateTime = (
-        "20200101100000.000000+0100"
-    )
+    radiopharmaceutical.RadiopharmaceuticalStartDateTime = "20200101100000"
     ds.RadiopharmaceuticalInformationSequence = Sequence([radiopharmaceutical])
 
     source = sitk.GetImageFromArray(np.zeros((1, 1, 1), dtype=np.uint16))

@@ -79,7 +79,12 @@ def parse_time(time_str):
         "%Y%m%d%H%M%S",
     ):
         try:
-            return datetime.strptime(time_str, fmt)
+            parsed = datetime.strptime(time_str, fmt)
+            # The PET timing code historically operates on naive datetimes.
+            # DICOM UTC offsets describe the local wall-clock value; discard
+            # only the offset after accepting it so all compared values retain
+            # the same established representation.
+            return parsed.replace(tzinfo=None)
         except (ValueError, TypeError):
             continue
 
@@ -711,7 +716,7 @@ def _enhanced_injection_datetime(ds, reference, half_life):
         raise DataStructureError("Administration datetime is inconsistent for a long-lived radionuclide.")
     injection = injection.replace(year=reference.year, month=reference.month, day=reference.day)
     clock_offset = (
-        reference.replace(tzinfo=None) - injection.replace(tzinfo=None)
+        datetime.combine(reference.date(), reference.time()) - injection
     ).total_seconds()
     if clock_offset < -3600:
         injection -= timedelta(days=1)
