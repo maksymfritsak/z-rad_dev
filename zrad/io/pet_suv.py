@@ -12,7 +12,7 @@ from ..exceptions import DataStructureError, DataStructureWarning
 ENHANCED_PET_SOP_CLASS_UID = "1.2.840.10008.5.1.4.1.1.130"
 
 
-def _is_enhanced_pet(ds):
+def is_enhanced_pet(ds):
     return str(getattr(ds, "SOPClassUID", "")) == ENHANCED_PET_SOP_CLASS_UID
 
 
@@ -748,7 +748,7 @@ def validate_pet_dicom_tags(dicom_files):
         ds = dcm_file["ds"]
         image_id = dcm_file["file_path"]
 
-        if _is_enhanced_pet(ds):
+        if is_enhanced_pet(ds):
             number_of_frames = int(getattr(ds, "NumberOfFrames", 1))
             for frame_index in range(number_of_frames):
                 _mapping, kind = _select_enhanced_mapping(ds, frame_index)
@@ -897,7 +897,7 @@ def validate_pet_dicom_tags(dicom_files):
 
 
 def apply_suv_correction(dicom_files, suv_image):
-    if len(dicom_files) == 1 and _is_enhanced_pet(dicom_files[0]["ds"]):
+    if len(dicom_files) == 1 and is_enhanced_pet(dicom_files[0]["ds"]):
         ds = pydicom.dcmread(dicom_files[0]["file_path"])
         return _apply_enhanced_suv_correction(ds, suv_image)
 

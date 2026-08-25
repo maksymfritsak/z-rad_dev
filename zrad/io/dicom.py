@@ -8,14 +8,7 @@ from pydicom.errors import InvalidDicomError
 from skimage import draw
 
 from ..exceptions import DataStructureError, DataStructureWarning
-from .pet_suv import apply_suv_correction, validate_pet_dicom_tags
-
-
-ENHANCED_PET_SOP_CLASS_UID = "1.2.840.10008.5.1.4.1.1.130"
-
-
-def _is_enhanced_pet(ds):
-    return str(getattr(ds, "SOPClassUID", "")) == ENHANCED_PET_SOP_CLASS_UID
+from .pet_suv import apply_suv_correction, is_enhanced_pet, validate_pet_dicom_tags
 
 
 def read_dicom_image(dicom_dir, modality):
@@ -28,7 +21,7 @@ def read_dicom_image(dicom_dir, modality):
     enhanced_pet = (
         modality == "PET"
         and len(dicom_files) == 1
-        and _is_enhanced_pet(dicom_files[0]["ds"])
+        and is_enhanced_pet(dicom_files[0]["ds"])
     )
     if modality in ["CT", "MRI", "PET"] and not enhanced_pet:
         validate_z_spacing(dicom_files)
@@ -190,7 +183,7 @@ def get_dicom_files(directory, modality):
             )
 
         dicom_files_info = filtered
-    enhanced_pet = any(_is_enhanced_pet(item["ds"]) for item in dicom_files_info)
+    enhanced_pet = any(is_enhanced_pet(item["ds"]) for item in dicom_files_info)
     if modality_dicom in ["CT", "PT", "MR"] and not enhanced_pet:
         dicom_files_info = remove_duplicate_slices(dicom_files_info)
         dicom_files_info = sort_by_geometric_position(dicom_files_info)
@@ -246,7 +239,7 @@ def process_dicom_series(dicom_files, modality):
     enhanced_pet = (
         modality == "PET"
         and len(dicom_files) == 1
-        and _is_enhanced_pet(dicom_files[0]["ds"])
+        and is_enhanced_pet(dicom_files[0]["ds"])
     )
     if enhanced_pet:
         # Enhanced PET is a single multi-frame object.  GDCM obtains its
