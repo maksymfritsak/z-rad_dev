@@ -15,6 +15,7 @@ Filter Classes
    ~filtering.spatial.Gabor
    ~filtering.wavelet.Wavelets2D
    ~filtering.wavelet.Wavelets3D
+   ~filtering.wavelet.Simoncelli
 
 Configuration Factory
 ---------------------

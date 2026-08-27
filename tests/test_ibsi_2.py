@@ -351,6 +351,25 @@ def test_ibsi_ii_ph_i_7(ibsi_ii_data_dir, checkerboard_phantom):
 
 
 @pytest.mark.integration
+def test_ibsi_ii_ph_i_8(ibsi_ii_data_dir, checkerboard_phantom):
+    for level in (1, 2, 3):
+        config = f'8.a.{level}'
+        filtering = create_filter(
+            filtering_method='Simoncelli',
+            dimensionality='3D',
+            padding_type='wrap',
+            decomposition_level=level,
+        )
+        _run_ph_i_case(
+            filtering,
+            checkerboard_phantom,
+            f'8_a_{level}-ValidCRM.nii',
+            config,
+            ibsi_ii_data_dir,
+        )
+
+
+@pytest.mark.integration
 def test_ibsi_ii_ph_ii_2a(ct_phantom_image, ct_phantom_mask):
     ibsi_features = ibsi_ii_feature_tolerances('2.A')
 
