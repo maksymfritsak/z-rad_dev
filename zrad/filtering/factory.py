@@ -1,6 +1,6 @@
 from .base import BaseFilter
 from .spatial import Gabor, Laws, LoG, Mean
-from .wavelet import Wavelets2D, Wavelets3D
+from .wavelet import Simoncelli, Wavelets2D, Wavelets3D
 
 
 def create_filter(filtering_method, **kwargs) -> BaseFilter:
@@ -13,7 +13,7 @@ def create_filter(filtering_method, **kwargs) -> BaseFilter:
 
     Parameters
     ----------
-    filtering_method : {"Mean", "Laplacian of Gaussian", "Laws Kernels", "Gabor", "Wavelets"}
+    filtering_method : {"Mean", "Laplacian of Gaussian", "Laws Kernels", "Gabor", "Wavelets", "Simoncelli"}
         Filter family to instantiate.
     **kwargs
         Constructor parameters for the selected filter. For wavelets, include
@@ -72,4 +72,11 @@ def create_filter(filtering_method, **kwargs) -> BaseFilter:
         if dim == '3D':
             return Wavelets3D(**common)
         raise ValueError(f"Filter_dimension {params['dimensionality']} is not supported.")
+    if filtering_method == 'Simoncelli':
+        return Simoncelli(
+            padding_type=params['padding_type'],
+            decomposition_level=int(params['decomposition_level']),
+            dimensionality=params.get('dimensionality', '3D'),
+            riesz_order=params.get('riesz_order'),
+        )
     raise ValueError(f"Filter {filtering_method} is not supported.")

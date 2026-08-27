@@ -1,8 +1,92 @@
+from math import factorial
+
 import numpy as np
 import pywt
 from scipy import ndimage as ndi
 
 from .base import BaseFilter
+
+
+class Simoncelli(BaseFilter):
+    """IBSI non-separable Simoncelli band-pass wavelet.
+
+    The wavelet is evaluated directly in the Fourier domain and therefore has
+    periodic boundary conditions.  ``decomposition_level`` selects the B map;
+    level one is the highest-frequency band.  An optional Riesz multi-index
+    applies the normalized higher-order Riesz transform to the B map.
+
+    Parameters
+    ----------
+    padding_type : {"wrap", "periodic"}
+        Periodic boundary handling (``periodic`` is an alias for ``wrap``).
+    decomposition_level : int
+        One-based scale level of the B map.
+    dimensionality : {"2D", "3D"}
+        In 2D mode each slice is filtered independently.
+    riesz_order : tuple of int, optional
+        Riesz multi-index, for example ``(0, 2, 0)``.  Its length must match
+        the filter dimensionality.  Omitting it returns the isotropic B map.
+    """
+
+    def __init__(self, padding_type, decomposition_level, dimensionality='3D', riesz_order=None):
+        if padding_type not in ('wrap', 'periodic'):
+            raise ValueError("Simoncelli filtering requires periodic padding ('wrap' or 'periodic').")
+        if dimensionality not in ('2D', '3D'):
+            raise ValueError("Simoncelli dimensionality must be '2D' or '3D'.")
+        if not isinstance(decomposition_level, int) or isinstance(decomposition_level, bool) or decomposition_level < 1:
+            raise ValueError('decomposition_level must be a positive integer.')
+
+        dimensions = int(dimensionality[0])
+        if riesz_order is not None:
+            if len(riesz_order) != dimensions or any(
+                not isinstance(order, (int, np.integer)) or isinstance(order, (bool, np.bool_)) or order < 0
+                for order in riesz_order
+            ):
+                raise ValueError(f'riesz_order must contain {dimensions} non-negative integers.')
+            riesz_order = tuple(int(order) for order in riesz_order)
+
+        super().__init__(
+            filtering_method='Simoncelli',
+            padding_type='wrap',
+            decomposition_level=decomposition_level,
+            dimensionality=dimensionality,
+            riesz_order=riesz_order,
+        )
+        self.decomposition_level = decomposition_level
+        self.dimensionality = dimensionality
+        self.riesz_order = riesz_order
+
+    def _frequency_response(self, shape):
+        # IBSI defines the discrete grid including both normalized Nyquist
+        # endpoints.  Build it centered, then align it with NumPy's FFT order.
+        centered = np.meshgrid(*(np.linspace(-np.pi, np.pi, size) for size in shape), indexing='ij')
+        coordinates = [np.fft.ifftshift(coordinate) for coordinate in centered]
+        radius = np.sqrt(sum(coordinate**2 for coordinate in coordinates))
+        nyquist = np.pi / (2 ** (self.decomposition_level - 1))
+        response = np.zeros(shape, dtype=np.float64)
+        support = (radius >= nyquist / 4) & (radius <= nyquist)
+        response[support] = np.cos(np.pi / 2 * np.log2(2 * radius[support] / nyquist))
+
+        if self.riesz_order is not None and sum(self.riesz_order):
+            total_order = sum(self.riesz_order)
+            coefficient = np.sqrt(factorial(total_order) / np.prod([factorial(order) for order in self.riesz_order]))
+            numerator = np.ones(shape, dtype=np.float64)
+            for coordinate, order in zip(coordinates, self.riesz_order):
+                numerator *= coordinate**order
+            riesz = np.zeros(shape, dtype=np.complex128)
+            nonzero = radius > 0
+            riesz[nonzero] = (-1j) ** total_order * coefficient * numerator[nonzero] / radius[nonzero] ** total_order
+            response = response * riesz
+        return response
+
+    def _filter_periodic(self, image):
+        result = np.fft.ifftn(np.fft.fftn(image) * self._frequency_response(image.shape))
+        return np.real_if_close(result, tol=1000).real
+
+    def _apply_array(self, img):
+        if self.dimensionality == '3D':
+            return self._filter_periodic(img)
+        return np.stack([self._filter_periodic(img[:, :, index]) for index in range(img.shape[2])], axis=2)
 
 
 class Wavelets2D(BaseFilter):
