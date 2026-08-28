@@ -39,8 +39,8 @@ class Simoncelli(BaseFilter):
         dimensions = int(dimensionality[0])
         if riesz_order is not None:
             if len(riesz_order) != dimensions or any(
-                    not isinstance(order, (int, np.integer)) or isinstance(order, (bool, np.bool_)) or order < 0
-                    for order in riesz_order
+                not isinstance(order, (int, np.integer)) or isinstance(order, (bool, np.bool_)) or order < 0
+                for order in riesz_order
             ):
                 raise ValueError(f'riesz_order must contain {dimensions} non-negative integers.')
             riesz_order = tuple(int(order) for order in riesz_order)
@@ -64,7 +64,7 @@ class Simoncelli(BaseFilter):
         coordinates = [np.fft.ifftshift(c) for c in centered]
 
         # 3. Calculate Euclidean radial distance
-        radius = np.sqrt(sum(c ** 2 for c in coordinates))
+        radius = np.sqrt(sum(c**2 for c in coordinates))
 
         # 4. IBSI Nyquist cutoff frequency for scale j
         nyquist = np.pi / (2 ** (self.decomposition_level - 1))
@@ -84,12 +84,13 @@ class Simoncelli(BaseFilter):
 
             numerator = np.ones(shape, dtype=np.float64)
             for c, order in zip(coordinates, self.riesz_order):
-                numerator *= (c ** order)
+                numerator *= c**order
 
             riesz = np.zeros(shape, dtype=np.complex128)
             nonzero = radius > 0
-            riesz[nonzero] = ((-1j) ** total_order) * coefficient * numerator[nonzero] / (
-                        radius[nonzero] ** total_order)
+            riesz[nonzero] = (
+                ((-1j) ** total_order) * coefficient * numerator[nonzero] / (radius[nonzero] ** total_order)
+            )
             response = response * riesz
 
         return response
