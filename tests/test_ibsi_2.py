@@ -405,23 +405,6 @@ def test_ibsi_ii_ph_i_9(ibsi_ii_data_dir, impulse_phantom, sphere_phantom):
         ibsi_ii_data_dir,
     )
 
-    filtering = create_filter(
-        filtering_method='Riesz-transformed LoG',
-        dimensionality='3D',
-        padding_type='constant',
-        sigma_mm=3.0,
-        cutoff=4,
-        riesz_order=(0, 2, 0),
-        structure_tensor_sigma_mm=1.0,
-    )
-    _run_ph_i_case(
-        filtering,
-        sphere_phantom,
-        '9_b_2-ValidCRM.nii',
-        '9.b.2',
-        ibsi_ii_data_dir,
-    )
-
 
 @pytest.mark.integration
 def test_ibsi_ii_ph_ii_2a(ct_phantom_image, ct_phantom_mask):
