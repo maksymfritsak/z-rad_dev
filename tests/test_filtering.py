@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from zrad.filtering import Mean, Simoncelli, create_filter
+from zrad.filtering import Mean, RieszLoG, Simoncelli, create_filter
 from zrad.image import Image
 
 
@@ -16,6 +16,46 @@ def test_concrete_filter_constructor_valid_mean():
 def test_factory_creates_mean_from_config_parameters():
     flt = create_filter(filtering_method='Mean', padding_type='constant', support=3, dimensionality='2D')
     assert isinstance(flt, Mean)
+
+
+@pytest.mark.unit
+def test_factory_composes_riesz_transform_with_log():
+    flt = create_filter(
+        filtering_method='Riesz-transformed LoG',
+        padding_type='constant',
+        sigma_mm=3.0,
+        cutoff=4,
+        dimensionality='3D',
+        riesz_order=(1, 0, 0),
+    )
+
+    assert isinstance(flt, RieszLoG)
+    assert flt.get_params()['riesz_order'] == (1, 0, 0)
+
+
+@pytest.mark.unit
+def test_riesz_log_supports_structure_tensor_alignment():
+    flt = create_filter(
+        filtering_method='Riesz-transformed LoG',
+        padding_type='constant',
+        sigma_mm=3.0,
+        cutoff=4,
+        dimensionality='3D',
+        riesz_order=(0, 2, 0),
+        structure_tensor_sigma_mm=1.0,
+    )
+    image = Image(
+        array=np.pad(np.ones((3, 3, 3)), 2),
+        origin=(0.0, 0.0, 0.0),
+        spacing=np.ones(3),
+        direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        shape=(7, 7, 7),
+    )
+
+    filtered = flt.apply(image)
+
+    assert filtered.array.shape == image.array.shape
+    assert np.all(np.isfinite(filtered.array))
 
 
 @pytest.mark.unit
