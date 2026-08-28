@@ -212,7 +212,7 @@ class RieszLoG(LoG):
                     * direction[..., column]
                     * self._riesz_transform(log_response, order)
                 )
-        return response
+        return np.abs(response)
 
     def _apply_array(self, img):
         log_response = super()._apply_array(img)
