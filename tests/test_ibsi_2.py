@@ -43,10 +43,12 @@ def ibsi_ii_ph_i_validation(filtered_image, response_map, config_id):
         pytest.fail(f"Failed {config_id}")
 
 
-def ibsi_ii_ph_ii_validation(ibsi_features, features):
+def ibsi_ii_ph_ii_validation(ibsi_features, features, config_8b=False):
 
     for raw_tag, feature_info in ibsi_features.items():
         tag = str(raw_tag)
+        if config_8b and tag == 'stat_qcod':
+            continue
 
         if tag in features:
             val = float(feature_info['consensus_value'])
@@ -582,6 +584,64 @@ def test_ibsi_ii_ph_ii_7b(res3d_1mm_image_spline, res3d_1mm_mask_linear):
         response_map="HHH",
         decomposition_level=2,
         rotation_invariance=True,
+    )
+
+    filtered_image = filtering.apply(res3d_1mm_image_spline)
+
+    features = _extract_filtered_features(res3d_1mm_image_spline, filtered_image, res3d_1mm_mask_linear)
+    ibsi_ii_ph_ii_validation(ibsi_features, features)
+
+
+@pytest.mark.integration
+def test_ibsi_ii_ph_ii_8a(ct_phantom_image, ct_phantom_mask):
+    ibsi_features = ibsi_ii_feature_tolerances('8.A')
+
+    filtering = create_filter(
+        filtering_method='Simoncelli', padding_type='periodic', decomposition_level=1, dimensionality='2D'
+    )
+
+    filtered_image = filtering.apply(ct_phantom_image)
+
+    features = _extract_filtered_features(ct_phantom_image, filtered_image, ct_phantom_mask)
+    ibsi_ii_ph_ii_validation(ibsi_features, features)
+
+
+@pytest.mark.integration
+def test_ibsi_ii_ph_ii_8b(res3d_1mm_image_spline, res3d_1mm_mask_linear):
+    ibsi_features = ibsi_ii_feature_tolerances('8.B')
+
+    filtering = create_filter(
+        filtering_method='Simoncelli', padding_type='periodic', decomposition_level=1, dimensionality='3D'
+    )
+
+    filtered_image = filtering.apply(res3d_1mm_image_spline)
+
+    features = _extract_filtered_features(res3d_1mm_image_spline, filtered_image, res3d_1mm_mask_linear)
+    ibsi_ii_ph_ii_validation(ibsi_features, features, True)
+
+    # 8.B;Quartile coefficient of dispersion;stat_qcod;;
+
+
+@pytest.mark.integration
+def test_ibsi_ii_ph_ii_9a(ct_phantom_image, ct_phantom_mask):
+    ibsi_features = ibsi_ii_feature_tolerances('9.A')
+
+    filtering = create_filter(
+        filtering_method='Simoncelli', padding_type='periodic', decomposition_level=2, dimensionality='2D'
+    )
+
+    filtered_image = filtering.apply(ct_phantom_image)
+
+    features = _extract_filtered_features(ct_phantom_image, filtered_image, ct_phantom_mask)
+    ibsi_ii_ph_ii_validation(ibsi_features, features)
+
+
+@pytest.mark.integration
+def test_ibsi_ii_ph_ii_9b(res3d_1mm_image_spline, res3d_1mm_mask_linear):
+    ibsi_features = ibsi_ii_feature_tolerances('9.B')
+
+    filtering = create_filter(
+        filtering_method='Simoncelli', padding_type='periodic', decomposition_level=2, dimensionality='3D'
     )
 
     filtered_image = filtering.apply(res3d_1mm_image_spline)

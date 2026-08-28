@@ -10,10 +10,10 @@ from .base import BaseFilter
 class Simoncelli(BaseFilter):
     """IBSI non-separable Simoncelli band-pass wavelet.
 
-    The wavelet is evaluated directly in the Fourier domain and therefore has
-    periodic boundary conditions.  ``decomposition_level`` selects the B map;
-    level one is the highest-frequency band.  An optional Riesz multi-index
-    applies the normalized higher-order Riesz transform to the B map.
+    The wavelet is evaluated directly in the Fourier domain with periodic boundary
+    conditions. ``decomposition_level`` selects the B map; level one is the highest-
+    frequency band. An optional Riesz multi-index applies the normalized higher-order
+    Riesz transform to the B map.
 
     Parameters
     ----------
@@ -24,8 +24,8 @@ class Simoncelli(BaseFilter):
     dimensionality : {"2D", "3D"}
         In 2D mode each slice is filtered independently.
     riesz_order : tuple of int, optional
-        Riesz multi-index, for example ``(0, 2, 0)``.  Its length must match
-        the filter dimensionality.  Omitting it returns the isotropic B map.
+        Riesz multi-index, for example ``(0, 2)`` or ``(0, 2, 0)``. Its length must match
+        the filter dimensionality. Omitting it returns the isotropic B map.
     """
 
     def __init__(self, padding_type, decomposition_level, dimensionality='3D', riesz_order=None):
@@ -39,8 +39,8 @@ class Simoncelli(BaseFilter):
         dimensions = int(dimensionality[0])
         if riesz_order is not None:
             if len(riesz_order) != dimensions or any(
-                not isinstance(order, (int, np.integer)) or isinstance(order, (bool, np.bool_)) or order < 0
-                for order in riesz_order
+                    not isinstance(order, (int, np.integer)) or isinstance(order, (bool, np.bool_)) or order < 0
+                    for order in riesz_order
             ):
                 raise ValueError(f'riesz_order must contain {dimensions} non-negative integers.')
             riesz_order = tuple(int(order) for order in riesz_order)
@@ -57,36 +57,72 @@ class Simoncelli(BaseFilter):
         self.riesz_order = riesz_order
 
     def _frequency_response(self, shape):
-        # IBSI defines the discrete grid including both normalized Nyquist
-        # endpoints.  Build it centered, then align it with NumPy's FFT order.
-        centered = np.meshgrid(*(np.linspace(-np.pi, np.pi, size) for size in shape), indexing='ij')
-        coordinates = [np.fft.ifftshift(coordinate) for coordinate in centered]
-        radius = np.sqrt(sum(coordinate**2 for coordinate in coordinates))
-        nyquist = np.pi / (2 ** (self.decomposition_level - 1))
-        response = np.zeros(shape, dtype=np.float64)
-        support = (radius >= nyquist / 4) & (radius <= nyquist)
-        response[support] = np.cos(np.pi / 2 * np.log2(2 * radius[support] / nyquist))
+        # 1. IBSI grid generation: Linspace on [-pi, pi] inclusive with endpoint=True
+        centered = np.meshgrid(*(np.linspace(-np.pi, np.pi, s, endpoint=True) for s in shape), indexing='ij')
 
-        if self.riesz_order is not None and sum(self.riesz_order):
+        # 2. Shift coordinates to align with NumPy's unshifted FFT origin
+        coordinates = [np.fft.ifftshift(c) for c in centered]
+
+        # 3. Calculate Euclidean radial distance
+        radius = np.sqrt(sum(c ** 2 for c in coordinates))
+
+        # 4. IBSI Nyquist cutoff frequency for scale j
+        nyquist = np.pi / (2 ** (self.decomposition_level - 1))
+
+        response = np.zeros(shape, dtype=np.float64)
+
+        # 5. Mask support region: [nyquist/4, nyquist]
+        support = (radius >= nyquist / 4.0) & (radius <= nyquist)
+
+        # 6. Isotropic Simoncelli B-map continuous cosine profile
+        response[support] = np.cos((np.pi / 2.0) * np.log2(2.0 * radius[support] / nyquist))
+
+        # 7. Higher-Order Riesz Multi-Index Transform
+        if self.riesz_order is not None and sum(self.riesz_order) > 0:
             total_order = sum(self.riesz_order)
-            coefficient = np.sqrt(factorial(total_order) / np.prod([factorial(order) for order in self.riesz_order]))
+            coefficient = np.sqrt(factorial(total_order) / np.prod([factorial(o) for o in self.riesz_order]))
+
             numerator = np.ones(shape, dtype=np.float64)
-            for coordinate, order in zip(coordinates, self.riesz_order):
-                numerator *= coordinate**order
+            for c, order in zip(coordinates, self.riesz_order):
+                numerator *= (c ** order)
+
             riesz = np.zeros(shape, dtype=np.complex128)
             nonzero = radius > 0
-            riesz[nonzero] = (-1j) ** total_order * coefficient * numerator[nonzero] / radius[nonzero] ** total_order
+            riesz[nonzero] = ((-1j) ** total_order) * coefficient * numerator[nonzero] / (
+                        radius[nonzero] ** total_order)
             response = response * riesz
+
         return response
 
     def _filter_periodic(self, image):
-        result = np.fft.ifftn(np.fft.fftn(image) * self._frequency_response(image.shape))
-        return np.real_if_close(result, tol=1000).real
+        freq_resp = self._frequency_response(image.shape)
+        filtered_fft = np.fft.fftn(image) * freq_resp
+        result = np.fft.ifftn(filtered_fft)
+
+        # Total Riesz order parity determines whether spatial response is real or imaginary
+        total_order = sum(self.riesz_order) if self.riesz_order is not None else 0
+
+        if total_order % 2 == 0:
+            # Even orders (e.g. isotropic or (0,2) where sum=2) yield purely real output
+            return np.real(result)
+        else:
+            # Odd orders (e.g. (1,0) where sum=1) yield purely imaginary output
+            return np.imag(result)
 
     def _apply_array(self, img):
         if self.dimensionality == '3D':
             return self._filter_periodic(img)
-        return np.stack([self._filter_periodic(img[:, :, index]) for index in range(img.shape[2])], axis=2)
+
+        # 2D filtering mode
+        if img.ndim == 2:
+            return self._filter_periodic(img)
+
+        # 2D slice-by-slice filtering across 3D volumes
+        # Automatically detects slice axis (axis 0 for (Z,Y,X) or axis 2 for (Y,X,Z))
+        if img.shape[0] < img.shape[2]:
+            return np.stack([self._filter_periodic(img[i, :, :]) for i in range(img.shape[0])], axis=0)
+        else:
+            return np.stack([self._filter_periodic(img[:, :, i]) for i in range(img.shape[2])], axis=2)
 
 
 class Wavelets2D(BaseFilter):
