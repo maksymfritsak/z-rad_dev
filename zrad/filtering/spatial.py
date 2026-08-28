@@ -1,5 +1,6 @@
 from functools import lru_cache
 from itertools import permutations
+from math import factorial
 
 import cv2
 import numpy as np
@@ -139,6 +140,90 @@ class LoG(BaseFilter):
         else:
             filtered_img = None
         return filtered_img
+
+
+class RieszLoG(LoG):
+    """Laplacian-of-Gaussian followed by a normalized Riesz transform.
+
+    This is a composition of the spatial LoG filter and the Fourier-domain
+    Riesz operator, rather than a separate filtering family.  A second-order
+    response can optionally be steered along the local structure-tensor
+    direction.
+    """
+
+    def __init__(self, padding_type, sigma_mm, cutoff, dimensionality, riesz_order, structure_tensor_sigma_mm=None):
+        super().__init__(padding_type, sigma_mm, cutoff, dimensionality)
+        dimensions = int(dimensionality[0])
+        if len(riesz_order) != dimensions or any(
+            not isinstance(order, (int, np.integer)) or isinstance(order, (bool, np.bool_)) or order < 0
+            for order in riesz_order
+        ):
+            raise ValueError(f'riesz_order must contain {dimensions} non-negative integers.')
+        if sum(riesz_order) == 0:
+            raise ValueError('riesz_order must have a positive total order.')
+        if structure_tensor_sigma_mm is not None and (
+            not isinstance(structure_tensor_sigma_mm, (int, float)) or structure_tensor_sigma_mm <= 0
+        ):
+            raise ValueError('structure_tensor_sigma_mm must be a positive number.')
+        if structure_tensor_sigma_mm is not None and (dimensions != 3 or sum(riesz_order) != 2):
+            raise ValueError('Structure-tensor alignment is supported for second-order 3D Riesz transforms only.')
+
+        self.filtering_method = 'Riesz-transformed LoG'
+        self.riesz_order = tuple(int(order) for order in riesz_order)
+        self.structure_tensor_sigma_mm = structure_tensor_sigma_mm
+        self.filtering_params.update(riesz_order=self.riesz_order, structure_tensor_sigma_mm=structure_tensor_sigma_mm)
+
+    @staticmethod
+    def _riesz_transform(image, order):
+        total_order = sum(order)
+        coordinates = np.meshgrid(*(2.0 * np.pi * np.fft.fftfreq(size) for size in image.shape), indexing='ij')
+        radius = np.sqrt(sum(coordinate**2 for coordinate in coordinates))
+        coefficient = np.sqrt(factorial(total_order) / np.prod([factorial(value) for value in order]))
+        numerator = np.ones(image.shape)
+        for coordinate, value in zip(coordinates, order):
+            numerator *= coordinate**value
+        multiplier = np.zeros(image.shape, dtype=np.complex128)
+        nonzero = radius > 0
+        multiplier[nonzero] = (-1j) ** total_order * coefficient * numerator[nonzero] / radius[nonzero] ** total_order
+        return np.fft.ifftn(np.fft.fftn(image) * multiplier).real
+
+    def _aligned_second_order_response(self, image, log_response):
+        sigma = self.structure_tensor_sigma_mm / self.res_mm
+        gradients = np.gradient(ndi.gaussian_filter(image, sigma=sigma, mode=self.padding_type))
+        tensor = np.empty(image.shape + (3, 3))
+        for row in range(3):
+            for column in range(row, 3):
+                value = ndi.gaussian_filter(gradients[row] * gradients[column], sigma=sigma, mode=self.padding_type)
+                tensor[..., row, column] = value
+                tensor[..., column, row] = value
+        direction = np.linalg.eigh(tensor)[1][..., -1]
+
+        response = np.zeros_like(image)
+        for row in range(3):
+            order = [0, 0, 0]
+            order[row] = 2
+            response += direction[..., row] ** 2 * self._riesz_transform(log_response, order)
+            for column in range(row + 1, 3):
+                order = [0, 0, 0]
+                order[row] = order[column] = 1
+                response += (
+                    np.sqrt(2.0)
+                    * direction[..., row]
+                    * direction[..., column]
+                    * self._riesz_transform(log_response, order)
+                )
+        return response
+
+    def _apply_array(self, img):
+        log_response = super()._apply_array(img)
+        if self.structure_tensor_sigma_mm is not None:
+            return self._aligned_second_order_response(img, log_response)
+        # Image arrays are handled internally as (y, x, z), while the public
+        # multi-index follows the physical image axes (x, y, z).
+        order = self.riesz_order
+        if self.dimensionality == '3D':
+            order = (order[1], order[0], order[2])
+        return self._riesz_transform(log_response, order)
 
 
 class Laws(BaseFilter):

@@ -1,5 +1,5 @@
 from .base import BaseFilter
-from .spatial import Gabor, Laws, LoG, Mean
+from .spatial import Gabor, Laws, LoG, Mean, RieszLoG
 from .wavelet import Simoncelli, Wavelets2D, Wavelets3D
 
 
@@ -13,7 +13,7 @@ def create_filter(filtering_method, **kwargs) -> BaseFilter:
 
     Parameters
     ----------
-    filtering_method : {"Mean", "Laplacian of Gaussian", "Laws Kernels", "Gabor", "Wavelets", "Simoncelli"}
+    filtering_method : {"Mean", "Laplacian of Gaussian", "Riesz-transformed LoG", "Laws Kernels", "Gabor", "Wavelets", "Simoncelli"}
         Filter family to instantiate.
     **kwargs
         Constructor parameters for the selected filter. For wavelets, include
@@ -35,6 +35,15 @@ def create_filter(filtering_method, **kwargs) -> BaseFilter:
             sigma_mm=float(params['sigma_mm']),
             cutoff=float(params['cutoff']),
             dimensionality=params['dimensionality'],
+        )
+    if filtering_method == 'Riesz-transformed LoG':
+        return RieszLoG(
+            padding_type=params['padding_type'],
+            sigma_mm=float(params['sigma_mm']),
+            cutoff=float(params['cutoff']),
+            dimensionality=params['dimensionality'],
+            riesz_order=params['riesz_order'],
+            structure_tensor_sigma_mm=params.get('structure_tensor_sigma_mm'),
         )
     if filtering_method == 'Laws Kernels':
         return Laws(
