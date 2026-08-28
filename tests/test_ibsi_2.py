@@ -370,6 +370,7 @@ def test_ibsi_ii_ph_i_8(ibsi_ii_data_dir, checkerboard_phantom):
             ibsi_ii_data_dir,
         )
 
+
 @pytest.mark.integration
 def test_ibsi_ii_ph_i_9(ibsi_ii_data_dir, impulse_phantom, sphere_phantom):
     filtering = create_filter(
