@@ -57,11 +57,10 @@ class Simoncelli(BaseFilter):
         self.riesz_order = riesz_order
 
     def _frequency_response(self, shape):
-        # 1. IBSI grid generation: Linspace on [-pi, pi] inclusive with endpoint=True
-        centered = np.meshgrid(*(np.linspace(-np.pi, np.pi, s, endpoint=True) for s in shape), indexing='ij')
-
-        # 2. Shift coordinates to align with NumPy's unshifted FFT origin
-        coordinates = [np.fft.ifftshift(c) for c in centered]
+        # Use the exact frequency bins consumed by NumPy's unshifted FFT.  In
+        # particular, this keeps index zero at DC and represents the Nyquist
+        # frequency only once for even-sized axes.
+        coordinates = np.meshgrid(*(2.0 * np.pi * np.fft.fftfreq(s) for s in shape), indexing='ij')
 
         # 3. Calculate Euclidean radial distance
         radius = np.sqrt(sum(c**2 for c in coordinates))
@@ -99,16 +98,7 @@ class Simoncelli(BaseFilter):
         freq_resp = self._frequency_response(image.shape)
         filtered_fft = np.fft.fftn(image) * freq_resp
         result = np.fft.ifftn(filtered_fft)
-
-        # Total Riesz order parity determines whether spatial response is real or imaginary
-        total_order = sum(self.riesz_order) if self.riesz_order is not None else 0
-
-        if total_order % 2 == 0:
-            # Even orders (e.g. isotropic or (0,2) where sum=2) yield purely real output
-            return np.real(result)
-        else:
-            # Odd orders (e.g. (1,0) where sum=1) yield purely imaginary output
-            return np.imag(result)
+        return np.real(result)
 
     def _apply_array(self, img):
         if self.dimensionality == '3D':
@@ -118,12 +108,9 @@ class Simoncelli(BaseFilter):
         if img.ndim == 2:
             return self._filter_periodic(img)
 
-        # 2D slice-by-slice filtering across 3D volumes
-        # Automatically detects slice axis (axis 0 for (Z,Y,X) or axis 2 for (Y,X,Z))
-        if img.shape[0] < img.shape[2]:
-            return np.stack([self._filter_periodic(img[i, :, :]) for i in range(img.shape[0])], axis=0)
-        else:
-            return np.stack([self._filter_periodic(img[:, :, i]) for i in range(img.shape[2])], axis=2)
+        # BaseFilter always supplies volumes in (y, x, z) order, so 2D
+        # filtering must operate independently on planes along axis 2.
+        return np.stack([self._filter_periodic(img[:, :, i]) for i in range(img.shape[2])], axis=2)
 
 
 class Wavelets2D(BaseFilter):

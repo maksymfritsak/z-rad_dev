@@ -220,10 +220,14 @@ class RieszLoG(LoG):
             return self._aligned_second_order_response(img, log_response)
         # Image arrays are handled internally as (y, x, z), while the public
         # multi-index follows the physical image axes (x, y, z).
-        order = self.riesz_order
+        order = (self.riesz_order[1], self.riesz_order[0], *self.riesz_order[2:])
         if self.dimensionality == '3D':
-            order = (order[1], order[0], order[2])
-        return self._riesz_transform(log_response, order)
+            return self._riesz_transform(log_response, order)
+
+        response = np.empty_like(log_response)
+        for index in range(log_response.shape[2]):
+            response[:, :, index] = self._riesz_transform(log_response[:, :, index], order)
+        return response
 
 
 class Laws(BaseFilter):
