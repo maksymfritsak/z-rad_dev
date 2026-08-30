@@ -129,6 +129,9 @@ def impulse_phantom():
 def sphere_phantom():
     return Image.from_nifti('tests/data/IBSI_II/Ph_I/nifti/sphere/image/sphere.nii.gz')
 
+@pytest.fixture()
+def pattern_1_phantom():
+    return Image.from_nifti('tests/data/IBSI_II/Ph_I/nifti/pattern_1/image/pattern_1.nii.gz')
 
 @pytest.mark.integration
 def test_ibsi_ii_ph_i_1(ibsi_ii_data_dir, checkerboard_phantom, impulse_phantom):
@@ -407,17 +410,17 @@ def test_ibsi_ii_ph_i_9(ibsi_ii_data_dir, impulse_phantom, sphere_phantom):
 
 
 @pytest.mark.integration
-def test_ibsi_ii_ph_i_10(ibsi_ii_data_dir, impulse_phantom):
-    response_map = ibsi_ii_data_dir / 'Ph_I' / 'response_maps' / '10_a-ValidCRM.nii'
+def test_ibsi_ii_ph_i_10(ibsi_ii_data_dir, pattern_1_phantom):
+    response_map = ibsi_ii_data_dir / 'Ph_I' / 'response_maps' / '10_b_1-ValidCRM.nii'
     if not response_map.exists():
-        pytest.skip('The IBSI II 10.a response map is not included in the bundled test data.')
+        pytest.skip('The IBSI II 10.b.1 response map is not included in the bundled test data.')
 
     filtering = create_filter(
         filtering_method='Simoncelli',
         dimensionality='3D',
         padding_type='constant',
         decomposition_level=1,
-        riesz_order=(1, 0, 0),
+        riesz_order=(0, 2, 0),
     )
     _run_ph_i_case(
         filtering,
