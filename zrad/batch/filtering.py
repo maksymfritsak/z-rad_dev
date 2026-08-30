@@ -63,7 +63,7 @@ class BatchFilter:
         Input format. Values are normalized to lower-case during validation.
     modality : {"CT", "MRI", "PET", "MG", "RTDOSE"}
         Image modality used by the image reader.
-    filter_type : {"Mean", "Laplacian of Gaussian", "Laws Kernels", "Gabor", "Wavelets"}
+    filter_type : {"Mean", "Laplacian of Gaussian", "Riesz-transformed LoG", "Laws Kernels", "Gabor", "Wavelets", "Simoncelli"}
         Filter family to apply.
     filter_dimension : {"2D", "3D"}
         Apply the filter slice-wise in 2D or volumetrically in 3D.
@@ -131,6 +131,8 @@ class BatchFilter:
     gabor_theta: float | str | None = None
     gabor_rotation_invariance: bool | str = False
     gabor_orthogonal_planes: bool | str = False
+    riesz_order: Sequence[int] | str | None = None
+    structure_tensor_sigma_mm: float | str | None = None
     parallel_backend: str = 'processes'
 
     def validate(self) -> None:
@@ -246,6 +248,10 @@ class BatchFilter:
             "{filter_gabor_rotinv}_"
             "{filter_gabor_ortho}_"
             "{filter_padding_type}",
+            'Riesz-transformed LoG': "RieszLoG_{filter_dimension}_{filter_log_sigma}sigma_"
+            "{filter_log_cutoff}cutoff_Riesz{filter_riesz_order}_{filter_padding_type}",
+            'Simoncelli': "Simoncelli_{filter_dimension}_{filter_wavelet_decomp_lvl}_"
+            "Riesz{filter_riesz_order}_{filter_padding_type}",
         }
 
         if self.filter_type == 'Wavelets':
@@ -317,6 +323,16 @@ class BatchFilter:
                 cutoff=self.log_cutoff,
                 dimensionality=self.filter_dimension,
             )
+        if self.filter_type == 'Riesz-transformed LoG':
+            return create_filter(
+                filtering_method=self.filter_type,
+                padding_type=self.padding_type,
+                sigma_mm=self.log_sigma,
+                cutoff=self.log_cutoff,
+                dimensionality=self.filter_dimension,
+                riesz_order=self.riesz_order,
+                structure_tensor_sigma_mm=self.structure_tensor_sigma_mm,
+            )
         if self.filter_type == 'Laws Kernels':
             return create_filter(
                 filtering_method='Laws Kernels',
@@ -350,6 +366,14 @@ class BatchFilter:
                 decomposition_level=self.wavelet_decomposition_level,
                 rotation_invariance=_as_bool(self.wavelet_rotation_invariance),
             )
+        if self.filter_type == 'Simoncelli':
+            return create_filter(
+                filtering_method=self.filter_type,
+                padding_type=self.padding_type,
+                decomposition_level=self.wavelet_decomposition_level,
+                dimensionality=self.filter_dimension,
+                riesz_order=self.riesz_order,
+            )
         raise InvalidInputParametersError(f"Filter_type {self.filter_type} not supported.")
 
     def _validate_filter_parameters(self) -> None:
@@ -358,6 +382,16 @@ class BatchFilter:
         elif self.filter_type == 'Laplacian of Gaussian':
             self.log_sigma = _require_float(self.log_sigma, "log_sigma is required.")
             self.log_cutoff = _require_float(self.log_cutoff, "log_cutoff is required.")
+        elif self.filter_type == 'Riesz-transformed LoG':
+            self.log_sigma = _require_float(self.log_sigma, "log_sigma is required.")
+            self.log_cutoff = _require_float(self.log_cutoff, "log_cutoff is required.")
+            self.riesz_order = _require_riesz_order(self.riesz_order, self.filter_dimension)
+            if self.structure_tensor_sigma_mm is not None and str(self.structure_tensor_sigma_mm).strip():
+                self.structure_tensor_sigma_mm = _require_float(
+                    self.structure_tensor_sigma_mm, "structure_tensor_sigma_mm must be a number."
+                )
+            else:
+                self.structure_tensor_sigma_mm = None
         elif self.filter_type == 'Laws Kernels':
             self.laws_response_map = require_text(self.laws_response_map, "laws_response_map is required.")
             self.laws_pooling = require_text(self.laws_pooling, "laws_pooling is required.")
@@ -380,6 +414,11 @@ class BatchFilter:
                 "wavelet_decomposition_level is required.",
             )
             self.wavelet_rotation_invariance = _normalize_enable_disable(self.wavelet_rotation_invariance)
+        elif self.filter_type == 'Simoncelli':
+            self.wavelet_decomposition_level = _require_positive_int(
+                self.wavelet_decomposition_level, "wavelet_decomposition_level is required."
+            )
+            self.riesz_order = _optional_riesz_order(self.riesz_order, self.filter_dimension)
         else:
             raise InvalidInputParametersError(f"Filter_type {self.filter_type} not supported.")
 
@@ -407,6 +446,7 @@ class BatchFilter:
             'filter_gabor_theta': self.gabor_theta,
             'filter_gabor_rotinv': _enable_disable_text(self.gabor_rotation_invariance),
             'filter_gabor_ortho': _enable_disable_text(self.gabor_orthogonal_planes),
+            'filter_riesz_order': 'none' if self.riesz_order is None else '-'.join(map(str, self.riesz_order)),
         }
 
 
@@ -429,6 +469,29 @@ def _require_float(value, message: str) -> float:
         return float(value)
     except (TypeError, ValueError):
         raise InvalidInputParametersError(message)
+
+
+def _optional_riesz_order(value, dimensionality: str):
+    if value is None or str(value).strip() == '':
+        return None
+    return _require_riesz_order(value, dimensionality)
+
+
+def _require_riesz_order(value, dimensionality: str) -> tuple[int, ...]:
+    message = f"riesz_order must contain {dimensionality[0]} comma-separated non-negative integers."
+    if isinstance(value, str):
+        values = [item.strip() for item in value.split(',')]
+    else:
+        values = value
+    try:
+        result = tuple(int(item) for item in values)
+    except (TypeError, ValueError):
+        raise InvalidInputParametersError(message)
+    if len(result) != int(dimensionality[0]) or any(item < 0 for item in result):
+        raise InvalidInputParametersError(message)
+    if sum(result) == 0:
+        raise InvalidInputParametersError("riesz_order must have a positive total order.")
+    return result
 
 
 def _normalize_enable_disable(value) -> str:
