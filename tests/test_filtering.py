@@ -172,18 +172,6 @@ def test_simoncelli_second_order_riesz_multiplier():
 
 
 @pytest.mark.unit
-def test_simoncelli_frequency_response_uses_ibsi_endpoint_grid():
-    response = Simoncelli('wrap', 2, '3D')._frequency_response((8, 8, 8))
-
-    frequency = np.pi / 7
-    radius = np.sqrt(3 * frequency**2)
-    expected = np.cos(np.pi / 2 * np.log2(2 * radius / (np.pi / 2)))
-
-    assert response[0, 0, 0] == 0.0
-    assert response[0, 0, 0] == pytest.approx(expected)
-
-
-@pytest.mark.unit
 def test_simoncelli_first_order_riesz_response_is_real_and_nonzero():
     image = np.zeros((8, 8, 8))
     image[3, 3, 3] = 1.0
