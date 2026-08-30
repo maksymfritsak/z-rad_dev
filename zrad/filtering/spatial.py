@@ -4,6 +4,7 @@ from math import factorial
 
 import cv2
 import numpy as np
+from scipy import fft as sp_fft
 from scipy import ndimage as ndi
 
 from .base import BaseFilter
@@ -192,19 +193,38 @@ class RieszLoG(LoG):
         if self.padding_type == 'wrap':
             return self._riesz_transform(image, order)
 
-        # Double the transform domain so that opposite image boundaries are
-        # separated by an extension that follows the selected LoG boundary
-        # condition. ``symmetric`` matches scipy.ndimage's ``reflect`` mode.
-        padding = tuple((size // 2, size - size // 2) for size in image.shape)
-        mode = {'nearest': 'edge', 'reflect': 'symmetric'}.get(self.padding_type, self.padding_type)
-        padded = (
-            np.pad(image, padding, mode=mode, constant_values=0.0)
-            if mode == 'constant'
-            else np.pad(image, padding, mode=mode)
-        )
-        transformed = self._riesz_transform(padded, order)
-        crop = tuple(slice(before, before + size) for (before, _), size in zip(padding, image.shape))
-        return transformed[crop]
+        # A DCT represents the same even, non-periodic extension without
+        # materializing a volume twice as large along every axis. Odd powers
+        # map cosine modes into their sine/quadrature counterparts, while even
+        # powers remain in the cosine basis.
+        frequencies = np.meshgrid(*(np.pi * np.arange(size) / size for size in image.shape), indexing='ij', sparse=True)
+        radius = np.sqrt(sum(frequency**2 for frequency in frequencies))
+        total_order = sum(order)
+        coefficient = np.sqrt(factorial(total_order) / np.prod([factorial(value) for value in order]))
+        multiplier = np.ones(image.shape, dtype=np.float64)
+        for frequency, value in zip(frequencies, order):
+            multiplier *= frequency**value
+        nonzero = radius > 0
+        multiplier[nonzero] *= coefficient / radius[nonzero] ** total_order
+        multiplier[~nonzero] = 0.0
+        multiplier *= (-1) ** sum(value // 2 for value in order)
+
+        coefficients = sp_fft.dctn(image, type=2, norm='ortho') * multiplier
+        for axis, value in enumerate(order):
+            if value % 2:
+                shifted = np.zeros_like(coefficients)
+                source = [slice(None)] * image.ndim
+                destination = [slice(None)] * image.ndim
+                source[axis] = slice(1, None)
+                destination[axis] = slice(None, -1)
+                shifted[tuple(destination)] = coefficients[tuple(source)]
+                coefficients = shifted
+
+        result = coefficients
+        for axis, value in enumerate(order):
+            transform = sp_fft.idst if value % 2 else sp_fft.idct
+            result = transform(result, type=2, axis=axis, norm='ortho')
+        return result
 
     def _aligned_second_order_response(self, image, log_response):
         sigma = self.structure_tensor_sigma_mm / self.res_mm
