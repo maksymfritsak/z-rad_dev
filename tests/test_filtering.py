@@ -139,7 +139,7 @@ def test_simoncelli_b_maps_match_radial_definition(level):
     flt = Simoncelli(padding_type='periodic', decomposition_level=level, dimensionality='3D')
     shape = (8, 8, 8)
     response = flt._frequency_response(shape)
-    frequencies = 2 * np.pi * np.fft.fftfreq(shape[0])
+    frequencies = np.fft.ifftshift(np.linspace(-np.pi, np.pi, shape[0]))
     radius = np.sqrt(frequencies[1] ** 2 + frequencies[0] ** 2 + frequencies[0] ** 2)
     nyquist = np.pi / 2 ** (level - 1)
     expected = 0.0
@@ -166,16 +166,21 @@ def test_simoncelli_is_isotropic_and_validates_padding():
 def test_simoncelli_second_order_riesz_multiplier():
     base = Simoncelli('wrap', 1, '3D')._frequency_response((8, 8, 8))
     riesz = Simoncelli('wrap', 1, '3D', riesz_order=(0, 2, 0))._frequency_response((8, 8, 8))
-    frequencies = 2 * np.pi * np.fft.fftfreq(8)
+    frequencies = np.fft.ifftshift(np.linspace(-np.pi, np.pi, 8))
     expected_multiplier = -(frequencies[1] ** 2) / (frequencies[0] ** 2 + frequencies[1] ** 2 + frequencies[0] ** 2)
     assert riesz[1, 0, 0] == pytest.approx(base[1, 0, 0] * expected_multiplier)
 
 
 @pytest.mark.unit
-def test_simoncelli_frequency_response_has_true_dc_bin():
+def test_simoncelli_frequency_response_uses_ibsi_endpoint_grid():
     response = Simoncelli('wrap', 2, '3D')._frequency_response((8, 8, 8))
 
+    frequency = np.pi / 7
+    radius = np.sqrt(3 * frequency**2)
+    expected = np.cos(np.pi / 2 * np.log2(2 * radius / (np.pi / 2)))
+
     assert response[0, 0, 0] == 0.0
+    assert response[0, 0, 0] == pytest.approx(expected)
 
 
 @pytest.mark.unit

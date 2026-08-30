@@ -58,7 +58,8 @@ class Simoncelli(BaseFilter):
         self.riesz_order = riesz_order
 
     def _frequency_response(self, shape):
-        coordinates = np.meshgrid(*(2 * np.pi * np.fft.fftfreq(s) for s in shape), indexing='ij')
+        centered = np.meshgrid(*(np.linspace(-np.pi, np.pi, s) for s in shape), indexing='ij')
+        coordinates = [np.fft.ifftshift(coordinate) for coordinate in centered]
 
         # 3. Calculate Euclidean radial distance
         radius = np.sqrt(sum(c**2 for c in coordinates))
