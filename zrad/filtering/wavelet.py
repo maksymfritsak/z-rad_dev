@@ -134,7 +134,7 @@ class Simoncelli(BaseFilter):
             riesz[nonzero] = (
                 (-1j) ** total_order * coefficient * numerator[nonzero] / radius[nonzero] ** total_order
             )
-            response *= riesz
+            response = response * riesz
 
         result = np.fft.ifftn(np.fft.fftn(extended) * response).real
         return result[tuple(slice(0, length) for length in image.shape)]
