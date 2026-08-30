@@ -3,6 +3,12 @@ from .spatial import Gabor, Laws, LoG, Mean, RieszLoG
 from .wavelet import Simoncelli, Wavelets2D, Wavelets3D
 
 
+def _parse_riesz_order(value):
+    if isinstance(value, str):
+        return tuple(int(order.strip()) for order in value.split(','))
+    return value
+
+
 def create_filter(filtering_method, **kwargs) -> BaseFilter:
     """Create a filter from GUI or configuration-style parameters.
 
@@ -42,7 +48,7 @@ def create_filter(filtering_method, **kwargs) -> BaseFilter:
             sigma_mm=float(params['sigma_mm']),
             cutoff=float(params['cutoff']),
             dimensionality=params['dimensionality'],
-            riesz_order=params['riesz_order'],
+            riesz_order=_parse_riesz_order(params['riesz_order']),
             structure_tensor_sigma_mm=params.get('structure_tensor_sigma_mm'),
         )
     if filtering_method == 'Laws Kernels':
@@ -86,6 +92,6 @@ def create_filter(filtering_method, **kwargs) -> BaseFilter:
             padding_type=params['padding_type'],
             decomposition_level=int(params['decomposition_level']),
             dimensionality=params.get('dimensionality', '3D'),
-            riesz_order=params.get('riesz_order'),
+            riesz_order=_parse_riesz_order(params.get('riesz_order')),
         )
     raise ValueError(f"Filter {filtering_method} is not supported.")
