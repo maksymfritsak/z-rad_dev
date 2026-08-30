@@ -140,6 +140,7 @@ def test_simoncelli_b_maps_match_radial_definition(level):
     shape = (8, 8, 8)
     response = flt._frequency_response(shape)
     frequencies = np.fft.ifftshift(np.linspace(-np.pi, np.pi, shape[0]))
+    frequencies[0] = 0.0
     radius = np.sqrt(frequencies[1] ** 2 + frequencies[0] ** 2 + frequencies[0] ** 2)
     nyquist = np.pi / 2 ** (level - 1)
     expected = 0.0
@@ -167,6 +168,7 @@ def test_simoncelli_second_order_riesz_multiplier():
     base = Simoncelli('wrap', 1, '3D')._frequency_response((8, 8, 8))
     riesz = Simoncelli('wrap', 1, '3D', riesz_order=(0, 2, 0))._frequency_response((8, 8, 8))
     frequencies = np.fft.ifftshift(np.linspace(-np.pi, np.pi, 8))
+    frequencies[0] = 0.0
     expected_multiplier = -(frequencies[1] ** 2) / (frequencies[0] ** 2 + frequencies[1] ** 2 + frequencies[0] ** 2)
     assert riesz[1, 0, 0] == pytest.approx(base[1, 0, 0] * expected_multiplier)
 

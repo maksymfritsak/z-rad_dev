@@ -2,6 +2,7 @@ from math import factorial
 
 import numpy as np
 import pywt
+from scipy import fft as sp_fft
 from scipy import ndimage as ndi
 
 from .base import BaseFilter
@@ -58,8 +59,12 @@ class Simoncelli(BaseFilter):
         self.riesz_order = riesz_order
 
     def _frequency_response(self, shape):
-        centered = np.meshgrid(*(np.linspace(-np.pi, np.pi, s) for s in shape), indexing='ij')
-        coordinates = [np.fft.ifftshift(coordinate) for coordinate in centered]
+        frequency_axes = []
+        for size in shape:
+            frequencies = np.fft.ifftshift(np.linspace(-np.pi, np.pi, size))
+            frequencies[0] = 0.0
+            frequency_axes.append(frequencies)
+        coordinates = np.meshgrid(*frequency_axes, indexing='ij', sparse=True)
 
         # 3. Calculate Euclidean radial distance
         radius = np.sqrt(sum(c**2 for c in coordinates))
@@ -100,18 +105,41 @@ class Simoncelli(BaseFilter):
         result = np.fft.ifftn(filtered_fft)
         return np.real(result)
 
+    def _filter_nearest(self, image):
+        """Filter using the cosine basis associated with a nearest boundary."""
+        frequencies = np.meshgrid(
+            *(np.pi * np.arange(length) / length for length in image.shape), indexing='ij', sparse=True
+        )
+        radius = np.sqrt(sum(frequency**2 for frequency in frequencies))
+        nyquist = np.pi / (2 ** (self.decomposition_level - 1))
+        response = np.zeros(image.shape, dtype=np.float64)
+        support = (radius >= nyquist / 4.0) & (radius <= nyquist)
+        response[support] = np.cos((np.pi / 2.0) * np.log2(2.0 * radius[support] / nyquist))
+
+        if self.riesz_order is not None and sum(self.riesz_order) > 0:
+            total_order = sum(self.riesz_order)
+            coefficient = np.sqrt(factorial(total_order) / np.prod([factorial(o) for o in self.riesz_order]))
+            array_order = (self.riesz_order[1], self.riesz_order[0], *self.riesz_order[2:])
+            numerator = np.ones(image.shape, dtype=np.float64)
+            for frequency, order in zip(frequencies, array_order):
+                numerator *= frequency**order
+            nonzero = radius > 0
+            riesz = np.zeros(image.shape, dtype=np.float64)
+            # The cosine basis contains non-negative frequencies.  Retain the
+            # real Riesz phase for even orders; odd orders use its real-valued
+            # quadrature counterpart rather than producing an imaginary image.
+            phase = (-1) ** (total_order // 2)
+            riesz[nonzero] = coefficient * phase * numerator[nonzero] / radius[nonzero] ** total_order
+            response *= riesz
+
+        coefficients = sp_fft.dctn(image, type=2, norm='ortho')
+        return sp_fft.idctn(coefficients * response, type=2, norm='ortho')
+
     def _filter(self, image):
         if self.padding_type == 'wrap':
             return self._filter_periodic(image)
 
-        # The frequency-domain implementation is intrinsically circular. Extend
-        # every boundary by a full image length so that its periodic seam lies
-        # outside the returned field of view, then crop the filtered result.
-        padding = tuple((length, length) for length in image.shape)
-        padded = np.pad(image, padding, mode='edge')
-        filtered = self._filter_periodic(padded)
-        crop = tuple(slice(length, 2 * length) for length in image.shape)
-        return filtered[crop]
+        return self._filter_nearest(image)
 
     def _apply_array(self, img):
         if self.dimensionality == '3D':
