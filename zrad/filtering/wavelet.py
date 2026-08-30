@@ -2,7 +2,6 @@ from math import factorial
 
 import numpy as np
 import pywt
-from scipy import fft as sp_fft
 from scipy import ndimage as ndi
 
 from .base import BaseFilter
@@ -106,13 +105,20 @@ class Simoncelli(BaseFilter):
         return np.real(result)
 
     def _filter_nearest(self, image):
-        """Filter using the cosine basis associated with a nearest boundary."""
-        frequencies = np.meshgrid(
-            *(np.pi * np.arange(length) / length for length in image.shape), indexing='ij', sparse=True
-        )
+        """Filter an even extension, equivalent to a nearest-boundary cosine basis.
+
+        The explicit extension is needed for odd Riesz orders: those orders map
+        cosine modes to sine (quadrature) modes and therefore cannot be
+        synthesized by an inverse DCT alone.
+        """
+        extended = image
+        for axis in range(image.ndim):
+            extended = np.concatenate((extended, np.flip(extended, axis=axis)), axis=axis)
+
+        frequencies = np.meshgrid(*(2.0 * np.pi * np.fft.fftfreq(length) for length in extended.shape), indexing='ij')
         radius = np.sqrt(sum(frequency**2 for frequency in frequencies))
         nyquist = np.pi / (2 ** (self.decomposition_level - 1))
-        response = np.zeros(image.shape, dtype=np.float64)
+        response = np.zeros(extended.shape, dtype=np.float64)
         support = (radius >= nyquist / 4.0) & (radius <= nyquist)
         response[support] = np.cos((np.pi / 2.0) * np.log2(2.0 * radius[support] / nyquist))
 
@@ -120,20 +126,18 @@ class Simoncelli(BaseFilter):
             total_order = sum(self.riesz_order)
             coefficient = np.sqrt(factorial(total_order) / np.prod([factorial(o) for o in self.riesz_order]))
             array_order = (self.riesz_order[1], self.riesz_order[0], *self.riesz_order[2:])
-            numerator = np.ones(image.shape, dtype=np.float64)
+            numerator = np.ones(extended.shape, dtype=np.float64)
             for frequency, order in zip(frequencies, array_order):
                 numerator *= frequency**order
             nonzero = radius > 0
-            riesz = np.zeros(image.shape, dtype=np.float64)
-            # The cosine basis contains non-negative frequencies.  Retain the
-            # real Riesz phase for even orders; odd orders use its real-valued
-            # quadrature counterpart rather than producing an imaginary image.
-            phase = (-1) ** (total_order // 2)
-            riesz[nonzero] = coefficient * phase * numerator[nonzero] / radius[nonzero] ** total_order
+            riesz = np.zeros(extended.shape, dtype=np.complex128)
+            riesz[nonzero] = (
+                (-1j) ** total_order * coefficient * numerator[nonzero] / radius[nonzero] ** total_order
+            )
             response *= riesz
 
-        coefficients = sp_fft.dctn(image, type=2, norm='ortho')
-        return sp_fft.idctn(coefficients * response, type=2, norm='ortho')
+        result = np.fft.ifftn(np.fft.fftn(extended) * response).real
+        return result[tuple(slice(0, length) for length in image.shape)]
 
     def _filter(self, image):
         if self.padding_type == 'wrap':
