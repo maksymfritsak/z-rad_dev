@@ -139,7 +139,7 @@ def test_simoncelli_b_maps_match_radial_definition(level):
     flt = Simoncelli(padding_type='periodic', decomposition_level=level, dimensionality='3D')
     shape = (8, 8, 8)
     response = flt._frequency_response(shape)
-    frequencies = 2.0 * np.pi * np.fft.fftfreq(shape[0])
+    frequencies = np.fft.ifftshift(np.linspace(-np.pi, np.pi, shape[0]))
     radius = np.sqrt(frequencies[1] ** 2 + frequencies[0] ** 2 + frequencies[0] ** 2)
     nyquist = np.pi / 2 ** (level - 1)
     expected = 0.0
@@ -152,12 +152,13 @@ def test_simoncelli_b_maps_match_radial_definition(level):
 
 
 @pytest.mark.unit
-def test_simoncelli_is_isotropic_and_rejects_nonperiodic_padding():
+def test_simoncelli_is_isotropic_and_validates_padding():
     flt = create_filter(filtering_method='Simoncelli', padding_type='wrap', decomposition_level=1, dimensionality='3D')
     response = flt._frequency_response((8, 8, 8))
     assert response[1, 0, 0] == pytest.approx(response[0, 1, 0])
     assert response[1, 1, 0] == pytest.approx(response[1, 0, 1])
-    with pytest.raises(ValueError, match='periodic padding'):
+    assert Simoncelli(padding_type='nearest', decomposition_level=1).padding_type == 'nearest'
+    with pytest.raises(ValueError, match='Simoncelli padding'):
         Simoncelli(padding_type='reflect', decomposition_level=1)
 
 
@@ -165,9 +166,9 @@ def test_simoncelli_is_isotropic_and_rejects_nonperiodic_padding():
 def test_simoncelli_second_order_riesz_multiplier():
     base = Simoncelli('wrap', 1, '3D')._frequency_response((8, 8, 8))
     riesz = Simoncelli('wrap', 1, '3D', riesz_order=(0, 2, 0))._frequency_response((8, 8, 8))
-    frequencies = 2.0 * np.pi * np.fft.fftfreq(8)
+    frequencies = np.fft.ifftshift(np.linspace(-np.pi, np.pi, 8))
     expected_multiplier = -(frequencies[1] ** 2) / (frequencies[0] ** 2 + frequencies[1] ** 2 + frequencies[0] ** 2)
-    assert riesz[0, 1, 0] == pytest.approx(base[0, 1, 0] * expected_multiplier)
+    assert riesz[1, 0, 0] == pytest.approx(base[1, 0, 0] * expected_multiplier)
 
     @pytest.mark.unit
     def test_simoncelli_frequency_response_has_true_dc_bin():

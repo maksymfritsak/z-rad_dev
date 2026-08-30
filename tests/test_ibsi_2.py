@@ -129,9 +129,11 @@ def impulse_phantom():
 def sphere_phantom():
     return Image.from_nifti('tests/data/IBSI_II/Ph_I/nifti/sphere/image/sphere.nii.gz')
 
+
 @pytest.fixture()
 def pattern_1_phantom():
     return Image.from_nifti('tests/data/IBSI_II/Ph_I/nifti/pattern_1/image/pattern_1.nii.gz')
+
 
 @pytest.mark.integration
 def test_ibsi_ii_ph_i_1(ibsi_ii_data_dir, checkerboard_phantom, impulse_phantom):
@@ -418,15 +420,15 @@ def test_ibsi_ii_ph_i_10(ibsi_ii_data_dir, pattern_1_phantom):
     filtering = create_filter(
         filtering_method='Simoncelli',
         dimensionality='3D',
-        padding_type='constant',
+        padding_type='nearest',
         decomposition_level=1,
         riesz_order=(0, 2, 0),
     )
     _run_ph_i_case(
         filtering,
-        impulse_phantom,
+        pattern_1_phantom,
         response_map.name,
-        '10.a',
+        '10.b.1',
         ibsi_ii_data_dir,
     )
 

@@ -29,8 +29,8 @@ class Simoncelli(BaseFilter):
     """
 
     def __init__(self, padding_type, decomposition_level, dimensionality='3D', riesz_order=None):
-        if padding_type not in ('wrap', 'periodic'):
-            raise ValueError("Simoncelli filtering requires periodic padding ('wrap' or 'periodic').")
+        if padding_type not in ('nearest', 'wrap', 'periodic'):
+            raise ValueError("Simoncelli padding must be 'nearest', 'wrap', or 'periodic'.")
         if dimensionality not in ('2D', '3D'):
             raise ValueError("Simoncelli dimensionality must be '2D' or '3D'.")
         if not isinstance(decomposition_level, int) or isinstance(decomposition_level, bool) or decomposition_level < 1:
@@ -47,20 +47,19 @@ class Simoncelli(BaseFilter):
 
         super().__init__(
             filtering_method='Simoncelli',
-            padding_type='wrap',
+            padding_type='wrap' if padding_type == 'periodic' else padding_type,
             decomposition_level=decomposition_level,
             dimensionality=dimensionality,
             riesz_order=riesz_order,
         )
         self.decomposition_level = decomposition_level
         self.dimensionality = dimensionality
+        self.padding_type = 'wrap' if padding_type == 'periodic' else padding_type
         self.riesz_order = riesz_order
 
     def _frequency_response(self, shape):
-        # Use the exact frequency bins consumed by NumPy's unshifted FFT.  In
-        # particular, this keeps index zero at DC and represents the Nyquist
-        # frequency only once for even-sized axes.
-        coordinates = np.meshgrid(*(2.0 * np.pi * np.fft.fftfreq(s) for s in shape), indexing='ij')
+        centered = np.meshgrid(*(np.linspace(-np.pi, np.pi, s) for s in shape), indexing='ij')
+        coordinates = [np.fft.ifftshift(coordinate) for coordinate in centered]
 
         # 3. Calculate Euclidean radial distance
         radius = np.sqrt(sum(c**2 for c in coordinates))
@@ -82,7 +81,8 @@ class Simoncelli(BaseFilter):
             coefficient = np.sqrt(factorial(total_order) / np.prod([factorial(o) for o in self.riesz_order]))
 
             numerator = np.ones(shape, dtype=np.float64)
-            for c, order in zip(coordinates, self.riesz_order):
+            array_order = (self.riesz_order[1], self.riesz_order[0], *self.riesz_order[2:])
+            for c, order in zip(coordinates, array_order):
                 numerator *= c**order
 
             riesz = np.zeros(shape, dtype=np.complex128)
