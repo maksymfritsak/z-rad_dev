@@ -587,6 +587,10 @@ class FilteringTab(BaseTab):
             print("No previous data found!")
 
     def _filter_combo_box_changed(self, text):
+        self._set_combo_box_items(
+            self.padding_type_combo_box, ['Padding Type:', 'constant', 'nearest', 'wrap', 'reflect']
+        )
+        self._set_combo_box_items(self.wavelet_filter_decomposition_level_combo_box, ['Decomposition level:', '1', '2'])
         for widget in self._new_filter_widgets():
             widget.hide()
         if text == 'Mean':
@@ -822,6 +826,10 @@ class FilteringTab(BaseTab):
                 self.structure_tensor_sigma_label.show()
                 self.structure_tensor_sigma_field.show()
             else:
+                self._set_combo_box_items(self.padding_type_combo_box, ['Padding Type:', 'nearest', 'wrap'])
+                self._set_combo_box_items(
+                    self.wavelet_filter_decomposition_level_combo_box, ['Decomposition level:', '1', '2', '3']
+                )
                 self.wavelet_filter_decomposition_level_combo_box.show()
 
         else:
@@ -860,6 +868,15 @@ class FilteringTab(BaseTab):
             self.structure_tensor_sigma_label,
             self.structure_tensor_sigma_field,
         )
+
+    @staticmethod
+    def _set_combo_box_items(combo_box, items):
+        """Replace a combo box's choices while retaining a still-valid selection."""
+        selected = combo_box.currentText()
+        combo_box.clear()
+        combo_box.addItems(items)
+        if selected in items:
+            combo_box.setCurrentText(selected)
 
     def _hide_existing_filter_parameter_widgets(self):
         widgets = (

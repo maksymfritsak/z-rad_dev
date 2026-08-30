@@ -139,7 +139,7 @@ def test_simoncelli_b_maps_match_radial_definition(level):
     flt = Simoncelli(padding_type='periodic', decomposition_level=level, dimensionality='3D')
     shape = (8, 8, 8)
     response = flt._frequency_response(shape)
-    frequencies = np.fft.ifftshift(np.linspace(-np.pi, np.pi, shape[0]))
+    frequencies = 2 * np.pi * np.fft.fftfreq(shape[0])
     radius = np.sqrt(frequencies[1] ** 2 + frequencies[0] ** 2 + frequencies[0] ** 2)
     nyquist = np.pi / 2 ** (level - 1)
     expected = 0.0
@@ -166,31 +166,46 @@ def test_simoncelli_is_isotropic_and_validates_padding():
 def test_simoncelli_second_order_riesz_multiplier():
     base = Simoncelli('wrap', 1, '3D')._frequency_response((8, 8, 8))
     riesz = Simoncelli('wrap', 1, '3D', riesz_order=(0, 2, 0))._frequency_response((8, 8, 8))
-    frequencies = np.fft.ifftshift(np.linspace(-np.pi, np.pi, 8))
+    frequencies = 2 * np.pi * np.fft.fftfreq(8)
     expected_multiplier = -(frequencies[1] ** 2) / (frequencies[0] ** 2 + frequencies[1] ** 2 + frequencies[0] ** 2)
     assert riesz[1, 0, 0] == pytest.approx(base[1, 0, 0] * expected_multiplier)
 
-    @pytest.mark.unit
-    def test_simoncelli_frequency_response_has_true_dc_bin():
-        response = Simoncelli('wrap', 2, '3D')._frequency_response((8, 8, 8))
 
-        assert response[0, 0, 0] == 0.0
+@pytest.mark.unit
+def test_simoncelli_frequency_response_has_true_dc_bin():
+    response = Simoncelli('wrap', 2, '3D')._frequency_response((8, 8, 8))
 
-    @pytest.mark.unit
-    def test_simoncelli_first_order_riesz_response_is_real_and_nonzero():
-        image = np.zeros((8, 8, 8))
-        image[3, 3, 3] = 1.0
-        response = Simoncelli('wrap', 1, '3D', riesz_order=(1, 0, 0))._filter_periodic(image)
+    assert response[0, 0, 0] == 0.0
 
-        assert np.isrealobj(response)
-        assert np.max(np.abs(response)) > 0.0
 
-    @pytest.mark.unit
-    def test_simoncelli_2d_filters_slices_independently():
-        image = np.zeros((4, 5, 6))
-        image[:, :, 2] = np.arange(20).reshape(4, 5)
-        response = Simoncelli('wrap', 1, '2D')._apply_array(image)
+@pytest.mark.unit
+def test_simoncelli_first_order_riesz_response_is_real_and_nonzero():
+    image = np.zeros((8, 8, 8))
+    image[3, 3, 3] = 1.0
+    response = Simoncelli('wrap', 1, '3D', riesz_order=(1, 0, 0))._filter_periodic(image)
 
-        assert np.all(response[:, :, :2] == 0.0)
-        assert np.all(response[:, :, 3:] == 0.0)
-        assert np.any(response[:, :, 2] != 0.0)
+    assert np.isrealobj(response)
+    assert np.max(np.abs(response)) > 0.0
+
+
+@pytest.mark.unit
+def test_simoncelli_2d_filters_slices_independently():
+    image = np.zeros((4, 5, 6))
+    image[:, :, 2] = np.arange(20).reshape(4, 5)
+    response = Simoncelli('wrap', 1, '2D')._apply_array(image)
+
+    assert np.all(response[:, :, :2] == 0.0)
+    assert np.all(response[:, :, 3:] == 0.0)
+    assert np.any(response[:, :, 2] != 0.0)
+
+
+@pytest.mark.unit
+def test_simoncelli_nearest_padding_avoids_circular_boundary_response():
+    image = np.zeros((16, 16))
+    image[:, 0] = 1.0
+
+    nearest = Simoncelli('nearest', 1, '2D')._apply_array(image)
+    wrapped = Simoncelli('wrap', 1, '2D')._apply_array(image)
+
+    assert not np.allclose(nearest, wrapped)
+    assert np.max(np.abs(nearest[:, -1])) < np.max(np.abs(wrapped[:, -1]))

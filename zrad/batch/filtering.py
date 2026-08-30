@@ -415,6 +415,8 @@ class BatchFilter:
             )
             self.wavelet_rotation_invariance = _normalize_enable_disable(self.wavelet_rotation_invariance)
         elif self.filter_type == 'Simoncelli':
+            if self.padding_type not in ('nearest', 'wrap', 'periodic'):
+                raise InvalidInputParametersError("Simoncelli padding_type must be 'nearest', 'wrap', or 'periodic'.")
             self.wavelet_decomposition_level = _require_positive_int(
                 self.wavelet_decomposition_level, "wavelet_decomposition_level is required."
             )
