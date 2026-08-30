@@ -10,15 +10,15 @@ from .base import BaseFilter
 class Simoncelli(BaseFilter):
     """IBSI non-separable Simoncelli band-pass wavelet.
 
-    The wavelet is evaluated directly in the Fourier domain with periodic boundary
-    conditions. ``decomposition_level`` selects the B map; level one is the highest-
+    The wavelet is evaluated directly in the Fourier domain. ``decomposition_level``
+    selects the B map; level one is the highest-
     frequency band. An optional Riesz multi-index applies the normalized higher-order
     Riesz transform to the B map.
 
     Parameters
     ----------
-    padding_type : {"wrap", "periodic"}
-        Periodic boundary handling (``periodic`` is an alias for ``wrap``).
+    padding_type : {"nearest", "wrap", "periodic"}
+        Boundary handling. ``periodic`` is an alias for ``wrap``.
     decomposition_level : int
         One-based scale level of the B map.
     dimensionality : {"2D", "3D"}
@@ -58,8 +58,7 @@ class Simoncelli(BaseFilter):
         self.riesz_order = riesz_order
 
     def _frequency_response(self, shape):
-        centered = np.meshgrid(*(np.linspace(-np.pi, np.pi, s) for s in shape), indexing='ij')
-        coordinates = [np.fft.ifftshift(coordinate) for coordinate in centered]
+        coordinates = np.meshgrid(*(2 * np.pi * np.fft.fftfreq(s) for s in shape), indexing='ij')
 
         # 3. Calculate Euclidean radial distance
         radius = np.sqrt(sum(c**2 for c in coordinates))
@@ -100,17 +99,30 @@ class Simoncelli(BaseFilter):
         result = np.fft.ifftn(filtered_fft)
         return np.real(result)
 
+    def _filter(self, image):
+        if self.padding_type == 'wrap':
+            return self._filter_periodic(image)
+
+        # The frequency-domain implementation is intrinsically circular. Extend
+        # every boundary by a full image length so that its periodic seam lies
+        # outside the returned field of view, then crop the filtered result.
+        padding = tuple((length, length) for length in image.shape)
+        padded = np.pad(image, padding, mode='edge')
+        filtered = self._filter_periodic(padded)
+        crop = tuple(slice(length, 2 * length) for length in image.shape)
+        return filtered[crop]
+
     def _apply_array(self, img):
         if self.dimensionality == '3D':
-            return self._filter_periodic(img)
+            return self._filter(img)
 
         # 2D filtering mode
         if img.ndim == 2:
-            return self._filter_periodic(img)
+            return self._filter(img)
 
         # BaseFilter always supplies volumes in (y, x, z) order, so 2D
         # filtering must operate independently on planes along axis 2.
-        return np.stack([self._filter_periodic(img[:, :, i]) for i in range(img.shape[2])], axis=2)
+        return np.stack([self._filter(img[:, :, i]) for i in range(img.shape[2])], axis=2)
 
 
 class Wavelets2D(BaseFilter):
