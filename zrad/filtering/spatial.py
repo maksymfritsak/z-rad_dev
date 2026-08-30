@@ -187,6 +187,25 @@ class RieszLoG(LoG):
         multiplier[nonzero] = (-1j) ** total_order * coefficient * numerator[nonzero] / radius[nonzero] ** total_order
         return np.fft.ifftn(np.fft.fftn(image) * multiplier).real
 
+    def _boundary_aware_riesz_transform(self, image, order):
+        """Apply the Riesz transform without imposing unintended periodicity."""
+        if self.padding_type == 'wrap':
+            return self._riesz_transform(image, order)
+
+        # Double the transform domain so that opposite image boundaries are
+        # separated by an extension that follows the selected LoG boundary
+        # condition. ``symmetric`` matches scipy.ndimage's ``reflect`` mode.
+        padding = tuple((size // 2, size - size // 2) for size in image.shape)
+        mode = {'nearest': 'edge', 'reflect': 'symmetric'}.get(self.padding_type, self.padding_type)
+        padded = (
+            np.pad(image, padding, mode=mode, constant_values=0.0)
+            if mode == 'constant'
+            else np.pad(image, padding, mode=mode)
+        )
+        transformed = self._riesz_transform(padded, order)
+        crop = tuple(slice(before, before + size) for (before, _), size in zip(padding, image.shape))
+        return transformed[crop]
+
     def _aligned_second_order_response(self, image, log_response):
         sigma = self.structure_tensor_sigma_mm / self.res_mm
         gradients = np.gradient(ndi.gaussian_filter(image, sigma=sigma, mode=self.padding_type))
@@ -202,7 +221,7 @@ class RieszLoG(LoG):
         for row in range(3):
             order = [0, 0, 0]
             order[row] = 2
-            response += direction[..., row] ** 2 * self._riesz_transform(log_response, order)
+            response += direction[..., row] ** 2 * self._boundary_aware_riesz_transform(log_response, order)
             for column in range(row + 1, 3):
                 order = [0, 0, 0]
                 order[row] = order[column] = 1
@@ -210,7 +229,7 @@ class RieszLoG(LoG):
                     np.sqrt(2.0)
                     * direction[..., row]
                     * direction[..., column]
-                    * self._riesz_transform(log_response, order)
+                    * self._boundary_aware_riesz_transform(log_response, order)
                 )
         return np.abs(response)
 
@@ -222,11 +241,11 @@ class RieszLoG(LoG):
         # multi-index follows the physical image axes (x, y, z).
         order = (self.riesz_order[1], self.riesz_order[0], *self.riesz_order[2:])
         if self.dimensionality == '3D':
-            return self._riesz_transform(log_response, order)
+            return self._boundary_aware_riesz_transform(log_response, order)
 
         response = np.empty_like(log_response)
         for index in range(log_response.shape[2]):
-            response[:, :, index] = self._riesz_transform(log_response[:, :, index], order)
+            response[:, :, index] = self._boundary_aware_riesz_transform(log_response[:, :, index], order)
         return response
 
 
