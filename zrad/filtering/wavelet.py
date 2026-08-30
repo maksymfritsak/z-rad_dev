@@ -131,9 +131,7 @@ class Simoncelli(BaseFilter):
                 numerator *= frequency**order
             nonzero = radius > 0
             riesz = np.zeros(extended.shape, dtype=np.complex128)
-            riesz[nonzero] = (
-                (-1j) ** total_order * coefficient * numerator[nonzero] / radius[nonzero] ** total_order
-            )
+            riesz[nonzero] = (-1j) ** total_order * coefficient * numerator[nonzero] / radius[nonzero] ** total_order
             response = response * riesz
 
         result = np.fft.ifftn(np.fft.fftn(extended) * response).real
