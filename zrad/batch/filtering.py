@@ -249,7 +249,8 @@ class BatchFilter:
             "{filter_gabor_ortho}_"
             "{filter_padding_type}",
             'Riesz-transformed LoG': "RieszLoG_{filter_dimension}_{filter_log_sigma}sigma_"
-            "{filter_log_cutoff}cutoff_Riesz{filter_riesz_order}_{filter_padding_type}",
+            "{filter_log_cutoff}cutoff_Riesz{filter_riesz_order}"
+            "{filter_structure_tensor_suffix}_{filter_padding_type}",
             'Simoncelli': "Simoncelli_{filter_dimension}_{filter_wavelet_decomp_lvl}_"
             "Riesz{filter_riesz_order}_{filter_padding_type}",
         }
@@ -449,6 +450,11 @@ class BatchFilter:
             'filter_gabor_rotinv': _enable_disable_text(self.gabor_rotation_invariance),
             'filter_gabor_ortho': _enable_disable_text(self.gabor_orthogonal_planes),
             'filter_riesz_order': 'none' if self.riesz_order is None else '-'.join(map(str, self.riesz_order)),
+            'filter_structure_tensor_suffix': (
+                ''
+                if self.structure_tensor_sigma_mm is None
+                else f'_Tensor{self.structure_tensor_sigma_mm}sigma'
+            ),
         }
 
 
