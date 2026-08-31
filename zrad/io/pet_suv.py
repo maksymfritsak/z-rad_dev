@@ -110,16 +110,24 @@ def parse_time(time_str, vr=None):
     return datetime.strptime(components + fraction + offset, fmt)
 
 
-def _datetime_on_reference_date(value, reference):
+def _datetime_on_reference_date(value, reference, infer_previous_day=True):
     # Vendor-private reference fields may contain either TM or a complete DT.
     parsed = parse_time(value)
     tzinfo = parsed.tzinfo if parsed.tzinfo is not None else reference.tzinfo
-    return parsed.replace(
+    raw_value = value.decode("utf-8").strip() if isinstance(value, bytes) else str(value).strip()
+    components = re.match(r"\d+", raw_value)
+    if components is not None and len(components.group()) >= 8:
+        return parsed.replace(tzinfo=tzinfo)
+
+    result = parsed.replace(
         year=reference.year,
         month=reference.month,
         day=reference.day,
         tzinfo=tzinfo,
     )
+    if infer_previous_day and result > reference:
+        result -= timedelta(days=1)
+    return result
 
 
 def get_radionuclide_half_life(ds):
@@ -155,10 +163,9 @@ def get_decay_correction_reference_datetime(ds, acquisition_time, decay_constant
         series_date_value = getattr(ds, "SeriesDate", None)
         if series_date_value not in [None, ""]:
             series_date = parse_time(series_date_value, "DA")
+            series_time = _datetime_on_reference_date(ds.SeriesTime, series_date, infer_previous_day=False)
         else:
-            series_date = acquisition_time
-
-        series_time = _datetime_on_reference_date(ds.SeriesTime, series_date)
+            series_time = _datetime_on_reference_date(ds.SeriesTime, acquisition_time)
         if series_time.tzinfo is None and acquisition_time.tzinfo is not None:
             series_time = series_time.replace(tzinfo=acquisition_time.tzinfo)
     except (AttributeError, ValueError, TypeError):
