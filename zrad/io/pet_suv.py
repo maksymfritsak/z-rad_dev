@@ -556,6 +556,8 @@ def _enhanced_mapping_kind(mapping):
         return "BW"
     if "SUVBSA" in unit:
         return "BSA"
+    if "SUVIBW" in unit:
+        return "IBW"
     if "SUVLBMJAMES128" in unit:
         return "LBMJAMES128"
     if "SUVLBM(JANMAHASATIAN)" in unit or "SUVLBMJANMA" in unit:
@@ -580,7 +582,7 @@ def _select_enhanced_mapping(ds, frame_index):
         if sequence is None
         else [(item, _enhanced_mapping_kind(item)) for item in sequence if _mapping_has_values(item)]
     )
-    priorities = ("BW", "BSA", "LBM", "LBMJAMES128", "LBMJANMA", "BQML")
+    priorities = ("BW", "BSA", "IBW", "LBM", "LBMJAMES128", "LBMJANMA", "BQML")
     for kind in priorities:
         for mapping, candidate_kind in candidates:
             if candidate_kind == kind:
