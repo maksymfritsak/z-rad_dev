@@ -110,6 +110,29 @@ def parse_time(time_str, vr=None):
     return datetime.strptime(components + fraction + offset, fmt)
 
 
+def _dataset_timezone(ds):
+    dataset_offset = getattr(ds, "TimezoneOffsetFromUTC", None)
+    if dataset_offset in [None, ""]:
+        return None
+    match = re.fullmatch(
+        r"(?P<sign>[+-])(?P<hours>\d{2})(?P<minutes>\d{2})",
+        str(dataset_offset).strip(),
+    )
+    if match is None:
+        raise DataStructureError("Timezone Offset From UTC (0008,0201) is invalid.")
+    minutes = int(match.group("minutes"))
+    total_minutes = int(match.group("hours")) * 60 + minutes
+    if (
+        minutes >= 60
+        or (match.group("sign") == "+" and total_minutes > 14 * 60)
+        or (match.group("sign") == "-" and total_minutes > 12 * 60)
+    ):
+        raise DataStructureError("Timezone Offset From UTC (0008,0201) is invalid.")
+    if match.group("sign") == "-":
+        total_minutes = -total_minutes
+    return timezone(timedelta(minutes=total_minutes))
+
+
 def _datetime_on_reference_date(value, reference, infer_previous_day=True):
     # Vendor-private reference fields may contain either TM or a complete DT.
     parsed = parse_time(value)
@@ -238,14 +261,23 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
         injection_clock = injection_datetime
 
     acquisition_clock = parse_time(ds.AcquisitionTime, "TM")
-    if injection_datetime is not None and injection_datetime.tzinfo is not None:
-        if injection_clock.tzinfo is None:
-            injection_clock = injection_clock.replace(tzinfo=injection_datetime.tzinfo)
-        if acquisition_clock.tzinfo is None:
-            # DA and TM values carry no inline UTC offset. When paired with an
-            # offset-aware administration DT, use its offset so legacy datasets
-            # containing only one explicit offset remain comparable.
-            acquisition_clock = acquisition_clock.replace(tzinfo=injection_datetime.tzinfo)
+    dataset_timezone = _dataset_timezone(ds)
+    if injection_datetime is not None and injection_datetime.tzinfo is None and dataset_timezone is not None:
+        injection_datetime = injection_datetime.replace(tzinfo=dataset_timezone)
+    if injection_clock.tzinfo is None:
+        injection_timezone = dataset_timezone
+        if injection_timezone is None and injection_datetime is not None:
+            injection_timezone = injection_datetime.tzinfo
+        if injection_timezone is not None:
+            injection_clock = injection_clock.replace(tzinfo=injection_timezone)
+    if acquisition_clock.tzinfo is None:
+        acquisition_timezone = dataset_timezone
+        if acquisition_timezone is None and injection_datetime is not None:
+            # Preserve support for legacy datasets containing only one explicit
+            # offset on the administration DT.
+            acquisition_timezone = injection_datetime.tzinfo
+        if acquisition_timezone is not None:
+            acquisition_clock = acquisition_clock.replace(tzinfo=acquisition_timezone)
 
     # According to the DRO recommendations, long-lived radionuclides require
     # a reliable full administration datetime because uptake can exceed 24 h.
@@ -703,26 +735,10 @@ def _enhanced_datetime(ds, value):
     if parsed.tzinfo is not None:
         return parsed
 
-    dataset_offset = getattr(ds, "TimezoneOffsetFromUTC", None)
-    if dataset_offset in [None, ""]:
+    dataset_timezone = _dataset_timezone(ds)
+    if dataset_timezone is None:
         return parsed
-    match = re.fullmatch(
-        r"(?P<sign>[+-])(?P<hours>\d{2})(?P<minutes>\d{2})",
-        str(dataset_offset).strip(),
-    )
-    if match is None:
-        raise DataStructureError("Timezone Offset From UTC (0008,0201) is invalid.")
-    minutes = int(match.group("minutes"))
-    total_minutes = int(match.group("hours")) * 60 + minutes
-    if (
-        minutes >= 60
-        or (match.group("sign") == "+" and total_minutes > 14 * 60)
-        or (match.group("sign") == "-" and total_minutes > 12 * 60)
-    ):
-        raise DataStructureError("Timezone Offset From UTC (0008,0201) is invalid.")
-    if match.group("sign") == "-":
-        total_minutes = -total_minutes
-    return parsed.replace(tzinfo=timezone(timedelta(minutes=total_minutes)))
+    return parsed.replace(tzinfo=dataset_timezone)
 
 
 def _enhanced_decay_reference(ds, frame_index, half_life):
