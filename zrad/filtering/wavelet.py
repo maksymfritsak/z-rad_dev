@@ -105,15 +105,14 @@ class Simoncelli(BaseFilter):
         return np.real(result)
 
     def _filter_nearest(self, image):
-        """Filter an even extension, equivalent to a nearest-boundary cosine basis.
+        """Filter an edge-replicated extension for nearest padding.
 
         The explicit extension is needed for odd Riesz orders: those orders map
         cosine modes to sine (quadrature) modes and therefore cannot be
         synthesized by an inverse DCT alone.
         """
-        extended = image
-        for axis in range(image.ndim):
-            extended = np.concatenate((extended, np.flip(extended, axis=axis)), axis=axis)
+        padding = tuple((length // 2, length - length // 2) for length in image.shape)
+        extended = np.pad(image, padding, mode='edge')
 
         frequencies = np.meshgrid(*(2.0 * np.pi * np.fft.fftfreq(length) for length in extended.shape), indexing='ij')
         radius = np.sqrt(sum(frequency**2 for frequency in frequencies))
@@ -135,7 +134,8 @@ class Simoncelli(BaseFilter):
             response = response * riesz
 
         result = np.fft.ifftn(np.fft.fftn(extended) * response).real
-        return result[tuple(slice(0, length) for length in image.shape)]
+        crop = tuple(slice(before, before + length) for (before, _), length in zip(padding, image.shape))
+        return result[crop]
 
     def _filter(self, image):
         if self.padding_type == 'wrap':
