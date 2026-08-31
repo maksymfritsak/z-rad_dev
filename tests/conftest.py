@@ -63,7 +63,9 @@ def _extract_zip_to_dir(zip_path: Path, extract_dir: Path):
             # Skip macOS metadata
             if member.filename.startswith("__MACOSX/"):
                 continue
-            parts = Path(member.filename).parts
+            # ZIP entry names are standardized with forward slashes, but
+            # normalize legacy archives created on Windows as well.
+            parts = Path(member.filename.replace("\\", "/")).parts
             # Skip top-level directory entries
             if len(parts) <= 1:
                 continue
