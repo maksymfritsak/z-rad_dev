@@ -604,7 +604,7 @@ def _enhanced_mapping_kind(mapping):
         return "BSA"
     if "SUVIBW" in unit:
         return "IBW"
-    if "SUVLBMJAMES128" in unit:
+    if "SUVLBMJAMES128" in unit or "SUVLBM(JAMES128)" in unit:
         return "LBMJAMES128"
     if "SUVLBM(JANMAHASATIAN)" in unit or "SUVLBMJANMA" in unit:
         return "LBMJANMA"
