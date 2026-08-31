@@ -391,6 +391,12 @@ class BatchFilter:
                 self.structure_tensor_sigma_mm = _require_float(
                     self.structure_tensor_sigma_mm, "structure_tensor_sigma_mm must be a number."
                 )
+                if self.structure_tensor_sigma_mm <= 0:
+                    raise InvalidInputParametersError('structure_tensor_sigma_mm must be a positive number.')
+                if self.filter_dimension != '3D' or sum(self.riesz_order) != 2:
+                    raise InvalidInputParametersError(
+                        'Structure-tensor alignment is supported for second-order 3D Riesz transforms only.'
+                    )
             else:
                 self.structure_tensor_sigma_mm = None
         elif self.filter_type == 'Laws Kernels':
