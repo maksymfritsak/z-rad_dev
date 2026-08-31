@@ -24,14 +24,19 @@ def _acquire_file_lock(lock_path: Path, timeout: float = 60.0, check_interval: f
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
             os.close(fd)
             return
-        except (FileExistsError, PermissionError):
+        except FileExistsError:
+            # The lock existed when os.open() ran. It may be released before
+            # this process retries, which is a normal lock handoff.
+            pass
+        except PermissionError:
             # On Windows, opening an existing lock file with O_EXCL may raise
-            # PermissionError rather than FileExistsError.
+            # PermissionError rather than FileExistsError. Disambiguate that
+            # case from an unrelated permissions problem.
             if not lock_path.exists():
                 raise
-            if time.time() - start > timeout:
-                raise TimeoutError(f"Timeout waiting for lock {lock_path}")
-            time.sleep(check_interval)
+        if time.time() - start > timeout:
+            raise TimeoutError(f"Timeout waiting for lock {lock_path}")
+        time.sleep(check_interval)
 
 
 def _release_file_lock(lock_path: Path):
