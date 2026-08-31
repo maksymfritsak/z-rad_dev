@@ -193,6 +193,17 @@ class RieszLoG(LoG):
         if self.padding_type == 'wrap':
             return self._riesz_transform(image, order)
 
+        if self.padding_type in ('constant', 'nearest'):
+            # These boundary modes do not have a cosine-transform
+            # representation. Extend the domain according to the selected
+            # mode before applying the periodic Riesz transform.
+            padding = tuple((size // 2, size - size // 2) for size in image.shape)
+            mode = 'edge' if self.padding_type == 'nearest' else 'constant'
+            padded = np.pad(image, padding, mode=mode)
+            transformed = self._riesz_transform(padded, order)
+            crop = tuple(slice(before, before + size) for (before, _), size in zip(padding, image.shape))
+            return transformed[crop]
+
         # A DCT represents the same even, non-periodic extension without
         # materializing a volume twice as large along every axis. Odd powers
         # map cosine modes into their sine/quadrature counterparts, while even
