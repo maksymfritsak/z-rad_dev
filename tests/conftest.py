@@ -24,7 +24,11 @@ def _acquire_file_lock(lock_path: Path, timeout: float = 60.0, check_interval: f
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
             os.close(fd)
             return
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
+            # On Windows, opening an existing lock file with O_EXCL may raise
+            # PermissionError rather than FileExistsError.
+            if not lock_path.exists():
+                raise
             if time.time() - start > timeout:
                 raise TimeoutError(f"Timeout waiting for lock {lock_path}")
             time.sleep(check_interval)
@@ -104,7 +108,7 @@ def _prepare_data_dir(zip_path: Path, extract_dir: Path):
     return extract_dir
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def ibsi_i_data_dir():
     """
     Pytest fixture that provides the extracted IBSI_I data directory.
@@ -116,7 +120,7 @@ def ibsi_i_data_dir():
     return _prepare_data_dir(zip_path, extract_dir)
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def ibsi_ii_data_dir():
     """
     Pytest fixture that provides the extracted IBSI_II data directory.
@@ -125,4 +129,12 @@ def ibsi_ii_data_dir():
     """
     zip_path = Path(__file__).parent / 'data' / 'IBSI_II.zip'
     extract_dir = Path(__file__).parent / 'data' / 'IBSI_II'
+    return _prepare_data_dir(zip_path, extract_dir)
+
+
+@pytest.fixture(scope="session")
+def ibsi_suv_data_dir():
+    """Provide the extracted official IBSI-SUV v3.0.1 DRO directory."""
+    zip_path = Path(__file__).parent / "data" / "IBSI_SUV.zip"
+    extract_dir = Path(__file__).parent / "data" / "IBSI_SUV"
     return _prepare_data_dir(zip_path, extract_dir)
