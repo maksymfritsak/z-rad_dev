@@ -701,16 +701,13 @@ def _enhanced_injection_datetime(ds, reference, half_life):
     if half_life >= 41400:
         raise DataStructureError("Administration datetime is inconsistent for a long-lived radionuclide.")
     injection = injection.replace(year=reference.year, month=reference.month, day=reference.day)
-    clock_offset = (
-        reference.replace(tzinfo=None) - injection.replace(tzinfo=None)
-    ).total_seconds()
+    clock_offset = (reference.replace(tzinfo=None) - injection.replace(tzinfo=None)).total_seconds()
     if clock_offset < -3600:
         injection -= timedelta(days=1)
     reconstructed_offset = (reference - injection).total_seconds()
     if not -3600 <= reconstructed_offset < 2 * half_life:
         raise DataStructureError(
-            "Reconstructed administration datetime is inconsistent with the "
-            "decay-correction reference datetime."
+            "Reconstructed administration datetime is inconsistent with the decay-correction reference datetime."
         )
     return injection
 
@@ -800,8 +797,7 @@ def validate_pet_dicom_tags(dicom_files):
                 ):
                     try:
                         elapsed_time = (
-                            _datetime_on_reference_date(ds[(0x0071, 0x1022)].value, acquisition_time)
-                            - injection_time
+                            _datetime_on_reference_date(ds[(0x0071, 0x1022)].value, acquisition_time) - injection_time
                         ).total_seconds()
 
                     except (KeyError, TypeError):
@@ -814,8 +810,7 @@ def validate_pet_dicom_tags(dicom_files):
                 elif "GE" in ds.Manufacturer.upper():
                     try:
                         elapsed_time = (
-                            _datetime_on_reference_date(ds[(0x0009, 0x100D)].value, acquisition_time)
-                            - injection_time
+                            _datetime_on_reference_date(ds[(0x0009, 0x100D)].value, acquisition_time) - injection_time
                         ).total_seconds()
 
                     except (KeyError, TypeError):
