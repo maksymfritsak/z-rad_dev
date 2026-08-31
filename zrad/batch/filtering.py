@@ -457,9 +457,7 @@ class BatchFilter:
             'filter_gabor_ortho': _enable_disable_text(self.gabor_orthogonal_planes),
             'filter_riesz_order': 'none' if self.riesz_order is None else '-'.join(map(str, self.riesz_order)),
             'filter_structure_tensor_suffix': (
-                ''
-                if self.structure_tensor_sigma_mm is None
-                else f'_Tensor{self.structure_tensor_sigma_mm}sigma'
+                '' if self.structure_tensor_sigma_mm is None else f'_Tensor{self.structure_tensor_sigma_mm}sigma'
             ),
         }
 

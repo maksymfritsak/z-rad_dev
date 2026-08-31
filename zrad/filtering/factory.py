@@ -50,9 +50,7 @@ def create_filter(filtering_method, **kwargs) -> BaseFilter:
             dimensionality=params['dimensionality'],
             riesz_order=_parse_riesz_order(params['riesz_order']),
             structure_tensor_sigma_mm=(
-                None
-                if params.get('structure_tensor_sigma_mm') is None
-                else float(params['structure_tensor_sigma_mm'])
+                None if params.get('structure_tensor_sigma_mm') is None else float(params['structure_tensor_sigma_mm'])
             ),
         )
     if filtering_method == 'Laws Kernels':
