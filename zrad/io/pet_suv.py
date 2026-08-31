@@ -1,6 +1,6 @@
 import re
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pydicom
@@ -698,6 +698,33 @@ def _enhanced_suv_factor(ds, kind):
     return weight / normalization
 
 
+def _enhanced_datetime(ds, value):
+    parsed = parse_time(value, "DT")
+    if parsed.tzinfo is not None:
+        return parsed
+
+    dataset_offset = getattr(ds, "TimezoneOffsetFromUTC", None)
+    if dataset_offset in [None, ""]:
+        return parsed
+    match = re.fullmatch(
+        r"(?P<sign>[+-])(?P<hours>\d{2})(?P<minutes>\d{2})",
+        str(dataset_offset).strip(),
+    )
+    if match is None:
+        raise DataStructureError("Timezone Offset From UTC (0008,0201) is invalid.")
+    minutes = int(match.group("minutes"))
+    total_minutes = int(match.group("hours")) * 60 + minutes
+    if (
+        minutes >= 60
+        or (match.group("sign") == "+" and total_minutes > 14 * 60)
+        or (match.group("sign") == "-" and total_minutes > 12 * 60)
+    ):
+        raise DataStructureError("Timezone Offset From UTC (0008,0201) is invalid.")
+    if match.group("sign") == "-":
+        total_minutes = -total_minutes
+    return parsed.replace(tzinfo=timezone(timedelta(minutes=total_minutes)))
+
+
 def _enhanced_decay_reference(ds, frame_index, half_life):
     corrected = str(_attribute_from_groups(ds, frame_index, "DecayCorrected", "")).strip().upper()
     if corrected not in {"YES", "NO"}:
@@ -706,11 +733,11 @@ def _enhanced_decay_reference(ds, frame_index, half_life):
         value = _attribute_from_groups(ds, frame_index, "DecayCorrectionDateTime")
         if value in [None, ""]:
             raise DataStructureError("Decay Correction DateTime (0018,9701) is required.")
-        return parse_time(value, "DT")
+        return _enhanced_datetime(ds, value)
 
     value = _attribute_from_groups(ds, frame_index, "FrameReferenceDateTime")
     if value not in [None, ""]:
-        return parse_time(value, "DT")
+        return _enhanced_datetime(ds, value)
     acquisition = _attribute_from_groups(ds, frame_index, "FrameAcquisitionDateTime")
     duration = _attribute_from_groups(ds, frame_index, "FrameAcquisitionDuration")
     if acquisition in [None, ""] or duration in [None, ""]:
@@ -724,7 +751,7 @@ def _enhanced_decay_reference(ds, frame_index, half_life):
         decay_constant = np.log(2) / half_life
         x = decay_constant * duration_seconds
         average_offset = np.log(x / -np.expm1(-x)) / decay_constant
-    return parse_time(acquisition, "DT") + timedelta(seconds=average_offset)
+    return _enhanced_datetime(ds, acquisition) + timedelta(seconds=average_offset)
 
 
 def _enhanced_injection_datetime(ds, reference, half_life):
@@ -735,7 +762,7 @@ def _enhanced_injection_datetime(ds, reference, half_life):
     if value in [None, ""]:
         raise DataStructureError("Radiopharmaceutical Start DateTime (0018,1078) is required.")
     try:
-        injection = parse_time(value, "DT")
+        injection = _enhanced_datetime(ds, value)
     except (TypeError, ValueError):
         raise DataStructureError("Radiopharmaceutical Start DateTime (0018,1078) is invalid.")
     if (reference.tzinfo is None) != (injection.tzinfo is None):
