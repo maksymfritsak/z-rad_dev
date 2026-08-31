@@ -61,32 +61,57 @@ def is_fdg(name):
     return bool(fdg_pattern.search(name))
 
 
-def parse_time(time_str):
-    """Parse a DICOM date, time, or datetime string into a datetime object."""
+def parse_time(time_str, vr=None):
+    """Parse a DICOM DA, TM, or DT value into a datetime object."""
     if isinstance(time_str, bytes):
         time_str = time_str.decode("utf-8").strip()
 
     time_str = str(time_str).strip()
+    match = re.fullmatch(r"(?P<components>\d+)(?P<fraction>\.\d{1,6})?(?P<offset>[+-]\d{4})?", time_str)
+    if match is None:
+        raise ValueError(f"Time data '{time_str}' does not match a DICOM date or time format")
 
-    for fmt in (
-        "%H%M%S.%f",
-        "%H%M%S",
-        "%Y%m%d",
-        "%Y%m%d%H%M%S.%f%z",
-        "%Y%m%d%H%M%S%z",
-        "%Y%m%d%H%M%S.%f",
-        "%Y%m%d%H%M%S",
-    ):
-        try:
-            parsed = datetime.strptime(time_str, fmt)
-            return parsed
-        except (ValueError, TypeError):
-            continue
+    components = match.group("components")
+    fraction = match.group("fraction") or ""
+    offset = match.group("offset") or ""
+    vr = vr.upper() if vr is not None else None
+    if vr is None:
+        if offset or len(components) > 8:
+            vr = "DT"
+        elif len(components) == 8:
+            vr = "DA"
+        else:
+            vr = "TM"
 
-    raise ValueError(f"Time data '{time_str}' does not match expected formats")
+    formats = {
+        "DA": {8: "%Y%m%d"},
+        "TM": {2: "%H", 4: "%H%M", 6: "%H%M%S"},
+        "DT": {
+            4: "%Y",
+            6: "%Y%m",
+            8: "%Y%m%d",
+            10: "%Y%m%d%H",
+            12: "%Y%m%d%H%M",
+            14: "%Y%m%d%H%M%S",
+        },
+    }
+    if vr not in formats or len(components) not in formats[vr]:
+        raise ValueError(f"Time data '{time_str}' has invalid component width for DICOM {vr or 'value'}")
+    if fraction and not ((vr == "TM" and len(components) == 6) or (vr == "DT" and len(components) == 14)):
+        raise ValueError(f"Time data '{time_str}' has fractional seconds without a seconds component")
+    if offset and vr != "DT":
+        raise ValueError(f"Time data '{time_str}' has a UTC offset but is not a DICOM DT value")
+
+    fmt = formats[vr][len(components)]
+    if fraction:
+        fmt += ".%f"
+    if offset:
+        fmt += "%z"
+    return datetime.strptime(components + fraction + offset, fmt)
 
 
 def _datetime_on_reference_date(value, reference):
+    # Vendor-private reference fields may contain either TM or a complete DT.
     parsed = parse_time(value)
     tzinfo = parsed.tzinfo if parsed.tzinfo is not None else reference.tzinfo
     return parsed.replace(
@@ -129,7 +154,7 @@ def get_decay_correction_reference_datetime(ds, acquisition_time, decay_constant
     try:
         series_date_value = getattr(ds, "SeriesDate", None)
         if series_date_value not in [None, ""]:
-            series_date = parse_time(series_date_value)
+            series_date = parse_time(series_date_value, "DA")
         else:
             series_date = acquisition_time
 
@@ -196,16 +221,16 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
     injection_datetime = None
     if injection_datetime_present:
         try:
-            injection_datetime = parse_time(injection_datetime_value)
+            injection_datetime = parse_time(injection_datetime_value, "DT")
         except (ValueError, TypeError):
             raise DataStructureError("Radiopharmaceutical Start DateTime (0018,1078) is invalid.")
 
     if injection_time_present:
-        injection_clock = parse_time(injection_time_value)
+        injection_clock = parse_time(injection_time_value, "TM")
     else:
         injection_clock = injection_datetime
 
-    acquisition_clock = parse_time(ds.AcquisitionTime)
+    acquisition_clock = parse_time(ds.AcquisitionTime, "TM")
     if injection_datetime is not None and injection_datetime.tzinfo is not None:
         if injection_clock.tzinfo is None:
             injection_clock = injection_clock.replace(tzinfo=injection_datetime.tzinfo)
@@ -241,7 +266,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
         )
 
     if acquisition_date_present:
-        acquisition_date = parse_time(acquisition_date_value)
+        acquisition_date = parse_time(acquisition_date_value, "DA")
         acquisition_time = acquisition_clock.replace(
             year=acquisition_date.year,
             month=acquisition_date.month,
@@ -316,7 +341,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
         return validate_reconstructed_times(injection_time, acquisition_time)
 
     if acquisition_date_present:
-        acquisition_date = parse_time(acquisition_date_value)
+        acquisition_date = parse_time(acquisition_date_value, "DA")
 
         acquisition_time = acquisition_clock.replace(
             year=acquisition_date.year,
@@ -674,11 +699,11 @@ def _enhanced_decay_reference(ds, frame_index, half_life):
         value = _attribute_from_groups(ds, frame_index, "DecayCorrectionDateTime")
         if value in [None, ""]:
             raise DataStructureError("Decay Correction DateTime (0018,9701) is required.")
-        return parse_time(value)
+        return parse_time(value, "DT")
 
     value = _attribute_from_groups(ds, frame_index, "FrameReferenceDateTime")
     if value not in [None, ""]:
-        return parse_time(value)
+        return parse_time(value, "DT")
     acquisition = _attribute_from_groups(ds, frame_index, "FrameAcquisitionDateTime")
     duration = _attribute_from_groups(ds, frame_index, "FrameAcquisitionDuration")
     if acquisition in [None, ""] or duration in [None, ""]:
@@ -692,7 +717,7 @@ def _enhanced_decay_reference(ds, frame_index, half_life):
         decay_constant = np.log(2) / half_life
         x = decay_constant * duration_seconds
         average_offset = np.log(x / -np.expm1(-x)) / decay_constant
-    return parse_time(acquisition) + timedelta(seconds=average_offset)
+    return parse_time(acquisition, "DT") + timedelta(seconds=average_offset)
 
 
 def _enhanced_injection_datetime(ds, reference, half_life):
@@ -703,7 +728,7 @@ def _enhanced_injection_datetime(ds, reference, half_life):
     if value in [None, ""]:
         raise DataStructureError("Radiopharmaceutical Start DateTime (0018,1078) is required.")
     try:
-        injection = parse_time(value)
+        injection = parse_time(value, "DT")
     except (TypeError, ValueError):
         raise DataStructureError("Radiopharmaceutical Start DateTime (0018,1078) is invalid.")
     if (reference.tzinfo is None) != (injection.tzinfo is None):
