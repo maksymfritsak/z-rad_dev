@@ -79,15 +79,22 @@ def parse_time(time_str):
     ):
         try:
             parsed = datetime.strptime(time_str, fmt)
-            # The PET timing code historically operates on naive datetimes.
-            # DICOM UTC offsets describe the local wall-clock value; discard
-            # only the offset after accepting it so all compared values retain
-            # the same established representation.
-            return parsed.replace(tzinfo=None)
+            return parsed
         except (ValueError, TypeError):
             continue
 
     raise ValueError(f"Time data '{time_str}' does not match expected formats")
+
+
+def _datetime_on_reference_date(value, reference):
+    parsed = parse_time(value)
+    tzinfo = parsed.tzinfo if parsed.tzinfo is not None else reference.tzinfo
+    return parsed.replace(
+        year=reference.year,
+        month=reference.month,
+        day=reference.day,
+        tzinfo=tzinfo,
+    )
 
 
 def get_radionuclide_half_life(ds):
@@ -126,11 +133,9 @@ def get_decay_correction_reference_datetime(ds, acquisition_time, decay_constant
         else:
             series_date = acquisition_time
 
-        series_time = parse_time(ds.SeriesTime).replace(
-            year=series_date.year,
-            month=series_date.month,
-            day=series_date.day,
-        )
+        series_time = _datetime_on_reference_date(ds.SeriesTime, series_date)
+        if series_time.tzinfo is None and acquisition_time.tzinfo is not None:
+            series_time = series_time.replace(tzinfo=acquisition_time.tzinfo)
     except (AttributeError, ValueError, TypeError):
         pass
 
@@ -139,21 +144,13 @@ def get_decay_correction_reference_datetime(ds, acquisition_time, decay_constant
 
     if "SIEMENS" in manufacturer or "CPS" in manufacturer or "CTI" in manufacturer:
         try:
-            return parse_time(ds[(0x0071, 0x1022)].value).replace(
-                year=acquisition_time.year,
-                month=acquisition_time.month,
-                day=acquisition_time.day,
-            )
+            return _datetime_on_reference_date(ds[(0x0071, 0x1022)].value, acquisition_time)
         except (KeyError, TypeError, ValueError):
             pass
 
     if "GE" in manufacturer:
         try:
-            return parse_time(ds[(0x0009, 0x100D)].value).replace(
-                year=acquisition_time.year,
-                month=acquisition_time.month,
-                day=acquisition_time.day,
-            )
+            return _datetime_on_reference_date(ds[(0x0009, 0x100D)].value, acquisition_time)
         except (KeyError, TypeError, ValueError):
             frame_reference_time = float(ds.FrameReferenceTime) / 1000.0
             return acquisition_time - timedelta(seconds=frame_reference_time)
@@ -209,6 +206,14 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
         injection_clock = injection_datetime
 
     acquisition_clock = parse_time(ds.AcquisitionTime)
+    if injection_datetime is not None and injection_datetime.tzinfo is not None:
+        if injection_clock.tzinfo is None:
+            injection_clock = injection_clock.replace(tzinfo=injection_datetime.tzinfo)
+        if acquisition_clock.tzinfo is None:
+            # DA and TM values carry no inline UTC offset. When paired with an
+            # offset-aware administration DT, use its offset so legacy datasets
+            # containing only one explicit offset remain comparable.
+            acquisition_clock = acquisition_clock.replace(tzinfo=injection_datetime.tzinfo)
 
     # According to the DRO recommendations, long-lived radionuclides require
     # a reliable full administration datetime because uptake can exceed 24 h.
@@ -477,12 +482,23 @@ def calculate_ibw(height_cm, sex):
     return ibw
 
 
-def get_gml_normalization_info(ds):
-    """Parse GML SUV normalization metadata and compute the normalization factor."""
+def _gml_suv_type(ds):
     suv_type_elem = ds.get((0x0054, 0x1006), None)
     suv_type = (
         "BW" if suv_type_elem is None or suv_type_elem.value in [None, ""] else str(suv_type_elem.value).strip().upper()
     )
+    supported_types = {"BW", "LBM", "LBMJAMES128", "LBMJANMA", "IBW"}
+    if suv_type not in supported_types:
+        raise DataStructureError(
+            f"GML with SUV Type '{suv_type}' is not supported. "
+            f"Supported types are BW, LBM, LBMJAMES128, LBMJANMA, and IBW."
+        )
+    return suv_type
+
+
+def get_gml_normalization_info(ds):
+    """Parse GML SUV normalization metadata and compute the normalization factor."""
+    suv_type = _gml_suv_type(ds)
 
     try:
         patient_weight = float(ds.PatientWeight)
@@ -506,11 +522,6 @@ def get_gml_normalization_info(ds):
         factor = calculate_lbm_janmahasatian(height_cm, patient_weight, sex)
     elif suv_type == "IBW":
         factor = calculate_ibw(height_cm, sex)
-    else:
-        raise DataStructureError(
-            f"GML with SUV Type '{suv_type}' is not supported. "
-            f"Supported types are BW, LBM, LBMJAMES128, LBMJANMA, and IBW."
-        )
 
     return suv_type, factor
 
@@ -581,7 +592,11 @@ def _select_enhanced_mapping(ds, frame_index):
         item = pvt[0]
         kind = str(getattr(item, "RescaleType", "")).strip().upper()
         if kind in {"BQML", "GML", "CM2ML"} and hasattr(item, "RescaleSlope") and hasattr(item, "RescaleIntercept"):
-            return item, {"GML": "BW", "CM2ML": "BSA"}.get(kind, kind)
+            if kind == "GML":
+                kind = _gml_suv_type(ds)
+            elif kind == "CM2ML":
+                kind = "BSA"
+            return item, kind
 
     raise DataStructureError(
         "Enhanced PET frame has no Real World Value Mapping Sequence or "
@@ -623,12 +638,15 @@ def _enhanced_suv_factor(ds, kind):
         normalization = calculate_bsa_du_bois(height, weight) * 10.0
     else:
         sex = get_patient_sex(ds)
-        calculators = {
-            "LBM": calculate_lbm_morgan,
-            "LBMJAMES128": calculate_lbm_james128,
-            "LBMJANMA": calculate_lbm_janmahasatian,
-        }
-        normalization = calculators[kind](height, weight, sex)
+        if kind == "IBW":
+            normalization = calculate_ibw(height, sex)
+        else:
+            calculators = {
+                "LBM": calculate_lbm_morgan,
+                "LBMJAMES128": calculate_lbm_james128,
+                "LBMJANMA": calculate_lbm_janmahasatian,
+            }
+            normalization = calculators[kind](height, weight, sex)
     return weight / normalization
 
 
@@ -672,15 +690,28 @@ def _enhanced_injection_datetime(ds, reference, half_life):
         injection = parse_time(value)
     except (TypeError, ValueError):
         raise DataStructureError("Radiopharmaceutical Start DateTime (0018,1078) is invalid.")
+    if (reference.tzinfo is None) != (injection.tzinfo is None):
+        if reference.tzinfo is None:
+            injection = injection.replace(tzinfo=None)
+        else:
+            injection = injection.replace(tzinfo=reference.tzinfo)
     offset = (reference - injection).total_seconds()
     if -3600 <= offset < 2 * half_life:
         return injection
     if half_life >= 41400:
         raise DataStructureError("Administration datetime is inconsistent for a long-lived radionuclide.")
     injection = injection.replace(year=reference.year, month=reference.month, day=reference.day)
-    clock_offset = (datetime.combine(reference.date(), reference.time()) - injection).total_seconds()
+    clock_offset = (
+        reference.replace(tzinfo=None) - injection.replace(tzinfo=None)
+    ).total_seconds()
     if clock_offset < -3600:
         injection -= timedelta(days=1)
+    reconstructed_offset = (reference - injection).total_seconds()
+    if not -3600 <= reconstructed_offset < 2 * half_life:
+        raise DataStructureError(
+            "Reconstructed administration datetime is inconsistent with the "
+            "decay-correction reference datetime."
+        )
     return injection
 
 
@@ -769,11 +800,7 @@ def validate_pet_dicom_tags(dicom_files):
                 ):
                     try:
                         elapsed_time = (
-                            parse_time(ds[(0x0071, 0x1022)].value).replace(
-                                year=acquisition_time.year,
-                                month=acquisition_time.month,
-                                day=acquisition_time.day,
-                            )
+                            _datetime_on_reference_date(ds[(0x0071, 0x1022)].value, acquisition_time)
                             - injection_time
                         ).total_seconds()
 
@@ -787,11 +814,7 @@ def validate_pet_dicom_tags(dicom_files):
                 elif "GE" in ds.Manufacturer.upper():
                     try:
                         elapsed_time = (
-                            parse_time(ds[(0x0009, 0x100D)].value).replace(
-                                year=acquisition_time.year,
-                                month=acquisition_time.month,
-                                day=acquisition_time.day,
-                            )
+                            _datetime_on_reference_date(ds[(0x0009, 0x100D)].value, acquisition_time)
                             - injection_time
                         ).total_seconds()
 
@@ -879,11 +902,7 @@ def apply_suv_correction(dicom_files, suv_image):
             return str(value) if value is not None else None
 
         def get_datetime_on_acquisition_day(time_value, acquisition_time):
-            return parse_time(time_value).replace(
-                year=acquisition_time.year,
-                month=acquisition_time.month,
-                day=acquisition_time.day,
-            )
+            return _datetime_on_reference_date(time_value, acquisition_time)
 
         def compute_elapsed_time_for_start_decay_correction(
             ds,
