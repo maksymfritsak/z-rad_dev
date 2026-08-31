@@ -219,6 +219,20 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
     # a reliable full administration datetime because uptake can exceed 24 h.
     long_lived_radionuclide = half_life >= 41400
 
+    def validate_reconstructed_times(injection_time, acquisition_time):
+        decay_reference_time = get_decay_correction_reference_datetime(
+            ds,
+            acquisition_time,
+            decay_constant,
+        )
+        reconstructed_offset = (decay_reference_time - injection_time).total_seconds()
+        if not -3600 <= reconstructed_offset < 2 * half_life:
+            raise DataStructureError(
+                "Reconstructed administration and acquisition times are inconsistent "
+                "with the decay-correction reference datetime."
+            )
+        return injection_time, acquisition_time
+
     if not injection_datetime_present and long_lived_radionuclide:
         raise DataStructureError(
             "Radiopharmaceutical Start DateTime (0018,1078) is required "
@@ -299,7 +313,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
                     "of 6 hours or more."
                 )
 
-        return injection_time, acquisition_time
+        return validate_reconstructed_times(injection_time, acquisition_time)
 
     if acquisition_date_present:
         acquisition_date = parse_time(acquisition_date_value)
@@ -326,7 +340,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
                     "previous day results in a time difference of 6 hours or more."
                 )
 
-        return injection_time, acquisition_time
+        return validate_reconstructed_times(injection_time, acquisition_time)
 
     injection_time = injection_clock
     acquisition_time = acquisition_clock
@@ -341,7 +355,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
                 "in a time difference of 6 hours or more."
             )
 
-    return injection_time, acquisition_time
+    return validate_reconstructed_times(injection_time, acquisition_time)
 
 
 def calc_elapsed_time(ds, decay_constant, acquisition_time, injection_time):
