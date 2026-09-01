@@ -662,9 +662,9 @@ def _select_enhanced_mapping(ds, frame_index):
     )
     priorities = ("BW", "BSA", "IBW", "LBM", "LBMJAMES128", "LBMJANMA", "BQML")
     for kind in priorities:
-        for mapping, candidate_kind in candidates:
-            if candidate_kind == kind:
-                return mapping, kind
+        mappings = [mapping for mapping, candidate_kind in candidates if candidate_kind == kind]
+        if mappings:
+            return mappings, kind
 
     # Non-standard fallback allowed by the recommendation.
     pvt = _sequence_from_groups(ds, frame_index, "PixelValueTransformationSequence")
@@ -676,7 +676,7 @@ def _select_enhanced_mapping(ds, frame_index):
                 kind = _gml_suv_type(ds)
             elif kind == "CM2ML":
                 kind = "BSA"
-            return item, kind
+            return [item], kind
 
     raise DataStructureError(
         "Enhanced PET frame has no Real World Value Mapping Sequence or "
@@ -707,6 +707,42 @@ def _apply_real_world_mapping(values, mapping):
         except (AttributeError, TypeError, ValueError):
             raise DataStructureError("Real-world rescale slope or intercept is invalid.")
     return np.asarray(values, dtype=float) * slope + intercept
+
+
+def _mapping_range(mapping):
+    first = getattr(mapping, "RealWorldValueFirstValueMapped", None)
+    if first is None:
+        first = getattr(mapping, "DoubleFloatRealWorldValueFirstValueMapped", None)
+    last = getattr(mapping, "RealWorldValueLastValueMapped", None)
+    if last is None:
+        last = getattr(mapping, "DoubleFloatRealWorldValueLastValueMapped", None)
+    if last is None and first is not None and hasattr(mapping, "RealWorldValueLUTData"):
+        last = float(first) + len(mapping.RealWorldValueLUTData) - 1
+    if first is None or last is None:
+        raise DataStructureError("Segmented Real World Value Mapping items must declare first and last mapped values.")
+    return float(first), float(last)
+
+
+def _apply_real_world_mappings(values, mappings):
+    if len(mappings) == 1:
+        return _apply_real_world_mapping(values, mappings[0])
+
+    stored_values = np.asarray(values)
+    output = np.empty(stored_values.shape, dtype=float)
+    assigned = np.zeros(stored_values.shape, dtype=bool)
+    for mapping in mappings:
+        first, last = _mapping_range(mapping)
+        if first > last:
+            raise DataStructureError("Real World Value Mapping range has its first value after its last value.")
+        selected = (stored_values >= first) & (stored_values <= last)
+        if np.any(assigned & selected):
+            raise DataStructureError("Real World Value Mapping ranges overlap.")
+        if np.any(selected):
+            output[selected] = _apply_real_world_mapping(stored_values[selected], mapping)
+            assigned[selected] = True
+    if not np.all(assigned):
+        raise DataStructureError("Stored pixel value is outside the segmented Real World Value Mapping ranges.")
+    return output
 
 
 def _enhanced_suv_factor(ds, kind):
@@ -803,14 +839,14 @@ def _enhanced_injection_datetime(ds, reference, half_life):
     return injection
 
 
-def _apply_enhanced_suv_correction(ds, suv_image):
+def _enhanced_suv_array(ds):
     pixels = np.asarray(ds.pixel_array)
     frames = pixels[np.newaxis, ...] if pixels.ndim == 2 else pixels
     output = np.empty(frames.shape, dtype=float)
 
     for frame_index, stored_values in enumerate(frames):
-        mapping, kind = _select_enhanced_mapping(ds, frame_index)
-        values = _apply_real_world_mapping(stored_values, mapping)
+        mappings, kind = _select_enhanced_mapping(ds, frame_index)
+        values = _apply_real_world_mappings(stored_values, mappings)
         if kind == "BQML":
             weight = _patient_weight_kg(ds)
             half_life = get_radionuclide_half_life(ds)
@@ -825,6 +861,12 @@ def _apply_enhanced_suv_correction(ds, suv_image):
             values = values * _enhanced_suv_factor(ds, kind)
         output[frame_index] = values
 
+    return output
+
+
+def _apply_enhanced_suv_correction(ds, suv_image):
+    output = _enhanced_suv_array(ds)
+
     corrected = sitk.GetImageFromArray(output)
     corrected.CopyInformation(suv_image)
     return corrected
@@ -838,7 +880,7 @@ def validate_pet_dicom_tags(dicom_files):
         if _is_enhanced_pet(ds):
             number_of_frames = int(getattr(ds, "NumberOfFrames", 1))
             for frame_index in range(number_of_frames):
-                _mapping, kind = _select_enhanced_mapping(ds, frame_index)
+                _mappings, kind = _select_enhanced_mapping(ds, frame_index)
                 if kind == "BQML":
                     half_life = get_radionuclide_half_life(ds)
                     reference = _enhanced_decay_reference(ds, frame_index, half_life)
@@ -974,9 +1016,18 @@ def validate_pet_dicom_tags(dicom_files):
 
 
 def apply_suv_correction(dicom_files, suv_image):
-    if len(dicom_files) == 1 and _is_enhanced_pet(dicom_files[0]["ds"]):
-        ds = pydicom.dcmread(dicom_files[0]["file_path"])
-        return _apply_enhanced_suv_correction(ds, suv_image)
+    if dicom_files and all(_is_enhanced_pet(item["ds"]) for item in dicom_files):
+        datasets = [pydicom.dcmread(item["file_path"]) for item in dicom_files]
+        if len(datasets) == 1:
+            return _apply_enhanced_suv_correction(datasets[0], suv_image)
+
+        output = np.concatenate([_enhanced_suv_array(ds) for ds in datasets], axis=0)
+        corrected_image = sitk.GetImageFromArray(output)
+        try:
+            corrected_image.CopyInformation(suv_image)
+        except RuntimeError as exc:
+            raise DataStructureError("Enhanced PET instance frames do not match the assembled image geometry.") from exc
+        return corrected_image
 
     def process_single_slice(dicom_file_path):
         ds = pydicom.dcmread(dicom_file_path)

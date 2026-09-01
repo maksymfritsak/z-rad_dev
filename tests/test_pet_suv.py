@@ -10,7 +10,12 @@ from pydicom.uid import ExplicitVRLittleEndian
 
 from zrad.exceptions import DataStructureError
 from zrad.image import Image
-from zrad.io.pet_suv import _apply_enhanced_suv_correction, _enhanced_suv_factor, parse_time
+from zrad.io.pet_suv import (
+    _apply_enhanced_suv_correction,
+    _enhanced_suv_factor,
+    apply_suv_correction,
+    parse_time,
+)
 
 VALID_IBSI_SUV_DROS = (
     "DRO_0_0",
@@ -139,10 +144,14 @@ def _enhanced_pet(pixel_values):
     return ds
 
 
-def _mapping(slope, unit="g/ml{SUVbw}"):
+def _mapping(slope, unit="g/ml{SUVbw}", first=None, last=None):
     mapping = Dataset()
     mapping.RealWorldValueSlope = slope
     mapping.RealWorldValueIntercept = 0
+    if first is not None:
+        mapping.RealWorldValueFirstValueMapped = first
+    if last is not None:
+        mapping.RealWorldValueLastValueMapped = last
     units = Dataset()
     units.CodeValue = unit
     mapping.MeasurementUnitsCodeSequence = Sequence([units])
@@ -161,6 +170,42 @@ def test_enhanced_pet_uses_per_frame_real_world_value_slopes():
     result = _apply_enhanced_suv_correction(ds, source)
 
     np.testing.assert_allclose(sitk.GetArrayFromImage(result)[:, 0, 0], [6, 10])
+
+
+def test_enhanced_pet_applies_segmented_real_world_value_mappings_by_stored_range():
+    ds = _enhanced_pet([[[25, 75]]])
+    group = Dataset()
+    group.RealWorldValueMappingSequence = Sequence(
+        [
+            _mapping(1, first=0, last=49),
+            _mapping(2, first=50, last=100),
+        ]
+    )
+    ds.PerFrameFunctionalGroupsSequence = Sequence([group])
+    source = sitk.GetImageFromArray(np.zeros((1, 1, 2), dtype=np.uint16))
+
+    result = _apply_enhanced_suv_correction(ds, source)
+
+    np.testing.assert_allclose(sitk.GetArrayFromImage(result)[0, 0], [25, 150])
+
+
+def test_apply_suv_correction_joins_multiple_enhanced_pet_instances(monkeypatch):
+    datasets = {}
+    dicom_files = []
+    for index, slope in enumerate((2, 3)):
+        ds = _enhanced_pet([[[2]]])
+        group = Dataset()
+        group.RealWorldValueMappingSequence = Sequence([_mapping(slope)])
+        ds.PerFrameFunctionalGroupsSequence = Sequence([group])
+        path = f"part-{index}.dcm"
+        datasets[path] = ds
+        dicom_files.append({"file_path": path, "ds": ds})
+    monkeypatch.setattr(pydicom, "dcmread", lambda path: datasets[path])
+    source = sitk.GetImageFromArray(np.zeros((2, 1, 1), dtype=np.uint16))
+
+    result = apply_suv_correction(dicom_files, source)
+
+    np.testing.assert_allclose(sitk.GetArrayFromImage(result)[:, 0, 0], [4, 6])
 
 
 @pytest.mark.parametrize("suv_type", ["LBM", "LBMJAMES128", "LBMJANMA", "IBW"])

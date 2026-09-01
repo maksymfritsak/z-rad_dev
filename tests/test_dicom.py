@@ -52,6 +52,55 @@ def test_get_dicom_files_does_not_sort_enhanced_pet_by_top_level_geometry(monkey
     ]
 
 
+@pytest.mark.unit
+def test_read_dicom_image_skips_classic_spacing_validation_for_multiple_enhanced_pet_instances(monkeypatch):
+    datasets = []
+    for offset in (0, 2):
+        ds = Dataset()
+        ds.Modality = "PT"
+        ds.SOPClassUID = dicom.ENHANCED_PET_SOP_CLASS_UID
+        ds.ConcatenationFrameOffsetNumber = offset
+        datasets.append(ds)
+    dicom_files = [
+        {"file_path": f"part-{index}.dcm", "ds": ds}
+        for index, ds in enumerate(datasets)
+    ]
+    image = _make_sitk_image(size=(1, 1, 4))
+
+    monkeypatch.setattr(dicom, "get_dicom_files", lambda **_kwargs: dicom_files)
+    monkeypatch.setattr(
+        dicom,
+        "validate_z_spacing",
+        lambda _files: (_ for _ in ()).throw(AssertionError("classic spacing validation must not run")),
+    )
+    monkeypatch.setattr(dicom, "process_dicom_series", lambda _files, _modality: image)
+    monkeypatch.setattr(dicom, "validate_pet_dicom_tags", lambda _files: None)
+    monkeypatch.setattr(dicom, "apply_suv_correction", lambda _files, source: source)
+
+    assert dicom.read_dicom_image("pet", "PET") is image
+
+
+@pytest.mark.unit
+def test_process_dicom_series_joins_multiple_enhanced_pet_instances(monkeypatch):
+    datasets = []
+    images = {}
+    for index, values in enumerate(([[[1]], [[2]]], [[[3]], [[4]]])):
+        ds = Dataset()
+        ds.Modality = "PT"
+        ds.SOPClassUID = dicom.ENHANCED_PET_SOP_CLASS_UID
+        datasets.append({"file_path": f"part-{index}.dcm", "ds": ds})
+        image = sitk.GetImageFromArray(np.asarray(values, dtype=np.uint16))
+        image.SetSpacing((2.0, 2.0, 3.0))
+        images[f"part-{index}.dcm"] = image
+
+    monkeypatch.setattr(dicom.sitk, "ReadImage", lambda path: images[path])
+
+    result = dicom.process_dicom_series(datasets, "PET")
+
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(result)[:, 0, 0], [1, 2, 3, 4])
+    assert result.GetSpacing() == (2.0, 2.0, 3.0)
+
+
 def _contour(x, y, z, contour_type="CLOSED_PLANAR"):
     return {
         "type": contour_type,

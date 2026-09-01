@@ -10,6 +10,39 @@ from skimage import draw
 from ..exceptions import DataStructureError, DataStructureWarning
 from .pet_suv import apply_suv_correction, validate_pet_dicom_tags
 
+ENHANCED_PET_SOP_CLASS_UID = "1.2.840.10008.5.1.4.1.1.130"
+
+
+def _is_enhanced_pet_series(dicom_files, modality):
+    return (
+        modality == "PET"
+        and bool(dicom_files)
+        and all(
+            str(getattr(item["ds"], "SOPClassUID", "")) == ENHANCED_PET_SOP_CLASS_UID
+            for item in dicom_files
+        )
+    )
+
+
+def _sort_enhanced_pet_instances(dicom_files):
+    """Order instances so concatenated frame arrays follow DICOM frame order."""
+
+    def sort_key(indexed_item):
+        index, item = indexed_item
+        ds = item["ds"]
+        for priority, keyword in enumerate(
+            ("ConcatenationFrameOffsetNumber", "InConcatenationNumber", "InstanceNumber")
+        ):
+            value = getattr(ds, keyword, None)
+            if value not in [None, ""]:
+                try:
+                    return priority, int(value), index
+                except (TypeError, ValueError):
+                    pass
+        return 3, index, index
+
+    return [item for _, item in sorted(enumerate(dicom_files), key=sort_key)]
+
 
 def read_dicom_image(dicom_dir, modality):
     """Read a DICOM image series as a SimpleITK image."""
@@ -18,11 +51,7 @@ def read_dicom_image(dicom_dir, modality):
         raise DataStructureError(f"No {modality} data found in {dicom_dir}. Patient skipped.")
 
     image = None
-    enhanced_pet = (
-        modality == "PET"
-        and len(dicom_files) == 1
-        and str(getattr(dicom_files[0]["ds"], "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.130"
-    )
+    enhanced_pet = _is_enhanced_pet_series(dicom_files, modality)
     if modality in ["CT", "MRI", "PET"] and not enhanced_pet:
         validate_z_spacing(dicom_files)
     if modality == "US":
@@ -184,9 +213,12 @@ def get_dicom_files(directory, modality):
 
         dicom_files_info = filtered
     enhanced_pet = any(
-        str(getattr(item["ds"], "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.130" for item in dicom_files_info
+        str(getattr(item["ds"], "SOPClassUID", "")) == ENHANCED_PET_SOP_CLASS_UID
+        for item in dicom_files_info
     )
-    if modality_dicom in ["CT", "PT", "MR"] and not enhanced_pet:
+    if enhanced_pet:
+        dicom_files_info = _sort_enhanced_pet_instances(dicom_files_info)
+    elif modality_dicom in ["CT", "PT", "MR"]:
         dicom_files_info = remove_duplicate_slices(dicom_files_info)
         dicom_files_info = sort_by_geometric_position(dicom_files_info)
     return dicom_files_info
@@ -238,17 +270,31 @@ def modality_mapping(modality):
 
 
 def process_dicom_series(dicom_files, modality):
-    enhanced_pet = (
-        modality == "PET"
-        and len(dicom_files) == 1
-        and str(getattr(dicom_files[0]["ds"], "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.130"
-    )
+    enhanced_pet = _is_enhanced_pet_series(dicom_files, modality)
     if enhanced_pet:
-        # Enhanced PET is a single multi-frame object.  GDCM obtains its
-        # geometry from the functional groups; the classic-series code below
-        # expects top-level, one-frame geometry attributes and must not replace
-        # it.
-        return sitk.ReadImage(dicom_files[0]["file_path"])
+        # GDCM obtains Enhanced PET geometry from functional groups; the
+        # classic-series code below expects top-level, one-frame attributes.
+        instance_images = [sitk.ReadImage(item["file_path"]) for item in dicom_files]
+        if len(instance_images) == 1:
+            return instance_images[0]
+
+        frame_arrays = []
+        for instance_image in instance_images:
+            array = np.asarray(sitk.GetArrayFromImage(instance_image))
+            if array.ndim == 2:
+                array = array[np.newaxis, ...]
+            if array.ndim != 3:
+                raise DataStructureError("Enhanced PET instances must contain scalar two-dimensional frames.")
+            frame_arrays.append(array)
+        if any(array.shape[1:] != frame_arrays[0].shape[1:] for array in frame_arrays[1:]):
+            raise DataStructureError("Enhanced PET instances have inconsistent frame dimensions.")
+
+        image = sitk.GetImageFromArray(np.concatenate(frame_arrays, axis=0))
+        first_image = instance_images[0]
+        image.SetOrigin(first_image.GetOrigin())
+        image.SetSpacing(first_image.GetSpacing())
+        image.SetDirection(first_image.GetDirection())
+        return image
 
     if modality in ["CT", "MRI", "PET", "MG"]:
         reader = sitk.ImageSeriesReader()
