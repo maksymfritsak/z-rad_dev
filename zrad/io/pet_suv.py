@@ -325,9 +325,9 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
     if injection_datetime is not None and injection_datetime.tzinfo is None and dataset_timezone is not None:
         injection_datetime = injection_datetime.replace(tzinfo=dataset_timezone)
     if injection_clock.tzinfo is None:
-        injection_timezone = injection_datetime.tzinfo if injection_datetime is not None else None
-        if injection_timezone is None:
-            injection_timezone = dataset_timezone
+        injection_timezone = dataset_timezone
+        if injection_timezone is None and injection_datetime is not None:
+            injection_timezone = injection_datetime.tzinfo
         if injection_timezone is not None:
             injection_clock = injection_clock.replace(tzinfo=injection_timezone)
     if acquisition_clock.tzinfo is None:
@@ -897,7 +897,17 @@ def apply_suv_correction(dicom_files, suv_image):
             raise DataStructureError("Philips-specific scaling factors not present!")
 
         units = ds.Units
-        rescale_slope = _finite_positive(ds.RescaleSlope, "Rescale Slope (0028,1053)")
+        try:
+            rescale_slope = float(ds.RescaleSlope)
+        except (AttributeError, TypeError, ValueError):
+            raise DataStructureError("Rescale Slope (0028,1053) is missing or invalid.")
+        if not np.isfinite(rescale_slope):
+            raise DataStructureError("Rescale Slope (0028,1053) must be finite.")
+        if rescale_slope <= 0:
+            warnings.warn(
+                "Rescale Slope (0028,1053) is non-positive; applying it as encoded.",
+                DataStructureWarning,
+            )
         try:
             rescale_intercept = float(ds.RescaleIntercept)
         except (TypeError, ValueError):
