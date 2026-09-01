@@ -313,8 +313,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
 
         if ds.DecayCorrection == "NONE" and datetime_offset < 0:
             raise DataStructureError(
-                "Radiopharmaceutical Start DateTime is after the acquisition "
-                "datetime for an uncorrected PET frame."
+                "Radiopharmaceutical Start DateTime is after the acquisition datetime for an uncorrected PET frame."
             )
 
         # An implausible full datetime for a long-lived radionuclide cannot
