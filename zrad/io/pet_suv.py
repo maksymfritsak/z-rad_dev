@@ -190,6 +190,8 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
 
     A complete RadiopharmaceuticalStartDateTime is trusted only when its offset
     to the decay-correction reference datetime is >= -1 hour and < 2 half-lives.
+    For uncorrected frames, the reference is the acquisition datetime itself,
+    so the offset must be nonnegative.
 
     For short-lived radionuclides, unreliable or missing dates can be replaced
     by a time-based inference. If injection time is later than acquisition time,
@@ -249,6 +251,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
     # According to the DRO recommendations, long-lived radionuclides require
     # a reliable full administration datetime because uptake can exceed 24 h.
     long_lived_radionuclide = half_life >= 41400
+    minimum_reference_offset = 0 if ds.DecayCorrection == "NONE" else -3600
 
     def validate_reconstructed_times(injection_time, acquisition_time):
         decay_reference_time = get_decay_correction_reference_datetime(
@@ -257,7 +260,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
             decay_constant,
         )
         reconstructed_offset = (decay_reference_time - injection_time).total_seconds()
-        if not -3600 <= reconstructed_offset < 2 * half_life:
+        if not minimum_reference_offset <= reconstructed_offset < 2 * half_life:
             raise DataStructureError(
                 "Reconstructed administration and acquisition times are inconsistent "
                 "with the decay-correction reference datetime."
@@ -305,8 +308,14 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
 
         datetime_offset = (decay_reference_time - injection_datetime).total_seconds()
 
-        if -3600 <= datetime_offset < 2 * half_life:
+        if minimum_reference_offset <= datetime_offset < 2 * half_life:
             return injection_datetime, acquisition_time
+
+        if ds.DecayCorrection == "NONE" and datetime_offset < 0:
+            raise DataStructureError(
+                "Radiopharmaceutical Start DateTime is after the acquisition "
+                "datetime for an uncorrected PET frame."
+            )
 
         # An implausible full datetime for a long-lived radionuclide cannot
         # safely be repaired from clock times (DRO_error_4_2).
