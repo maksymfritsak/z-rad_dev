@@ -15,42 +15,9 @@ def _is_enhanced_pet(ds):
     return str(getattr(ds, "SOPClassUID", "")) == ENHANCED_PET_SOP_CLASS_UID
 
 
-def _functional_group(ds, frame_index):
-    """Return functional-group items in DICOM override order."""
-    groups = []
-    per_frame = getattr(ds, "PerFrameFunctionalGroupsSequence", None)
-    if per_frame is not None and frame_index < len(per_frame):
-        groups.append(per_frame[frame_index])
-    shared = getattr(ds, "SharedFunctionalGroupsSequence", None)
-    if shared:
-        groups.append(shared[0])
-    groups.append(ds)
-    return groups
-
-
-def _sequence_from_groups(ds, frame_index, keyword):
-    for group in _functional_group(ds, frame_index):
-        sequence = getattr(group, keyword, None)
-        if sequence:
-            return sequence
-    return None
-
-
-def _attribute_from_groups(ds, frame_index, keyword, default=None):
-    for group in _functional_group(ds, frame_index):
-        value = getattr(group, keyword, None)
-        if value not in [None, ""]:
-            return value
-        # Attributes such as Frame Reference DateTime live inside a named
-        # functional-group sequence rather than directly in its item.
-        for element in group:
-            if element.VR != "SQ":
-                continue
-            for item in element.value:
-                value = getattr(item, keyword, None)
-                if value not in [None, ""]:
-                    return value
-    return default
+def reject_unsupported_enhanced_pet(dicom_files):
+    if any(_is_enhanced_pet(dicom_file["ds"]) for dicom_file in dicom_files):
+        raise DataStructureError("Enhanced PET Image Storage is not supported.")
 
 
 def is_fdg(name):
@@ -604,249 +571,12 @@ def get_gml_normalization_info(ds):
     return suv_type, factor
 
 
-def _patient_weight_kg(ds):
-    try:
-        weight = float(ds.PatientWeight)
-    except (AttributeError, TypeError, ValueError):
-        raise DataStructureError("Patient Weight (0010,1030) is missing or invalid.")
-    if weight <= 0:
-        raise DataStructureError("Patient Weight (0010,1030) must be > 0.")
-    return weight / 1000.0 if weight >= 1000 else weight
-
-
-def _coded_unit(mapping):
-    sequence = getattr(mapping, "MeasurementUnitsCodeSequence", None)
-    if not sequence:
-        return None
-    code = sequence[0]
-    for keyword in ("CodeValue", "LongCodeValue", "URNCodeValue"):
-        value = getattr(code, keyword, None)
-        if value not in [None, ""]:
-            return str(value).strip().upper().replace(" ", "")
-    return None
-
-
-def _enhanced_mapping_kind(mapping):
-    unit = _coded_unit(mapping)
-    if unit is None:
-        return None
-    if "SUVBW" in unit or unit == "G/ML{SUVBW}":
-        return "BW"
-    if "SUVBSA" in unit:
-        return "BSA"
-    if "SUVIBW" in unit:
-        return "IBW"
-    if "SUVLBMJAMES128" in unit or "SUVLBM(JAMES128)" in unit:
-        return "LBMJAMES128"
-    if "SUVLBM(JANMAHASATIAN)" in unit or "SUVLBMJANMA" in unit:
-        return "LBMJANMA"
-    if "SUVLBM" in unit:
-        return "LBM"
-    if unit in {"BQ/ML", "BQML", "BQ.ML-1"}:
-        return "BQML"
-    return None
-
-
-def _mapping_has_values(mapping):
-    return hasattr(mapping, "RealWorldValueLUTData") or (
-        hasattr(mapping, "RealWorldValueSlope") and hasattr(mapping, "RealWorldValueIntercept")
-    )
-
-
-def _select_enhanced_mapping(ds, frame_index):
-    sequence = _sequence_from_groups(ds, frame_index, "RealWorldValueMappingSequence")
-    candidates = (
-        []
-        if sequence is None
-        else [(item, _enhanced_mapping_kind(item)) for item in sequence if _mapping_has_values(item)]
-    )
-    priorities = ("BW", "BSA", "IBW", "LBM", "LBMJAMES128", "LBMJANMA", "BQML")
-    for kind in priorities:
-        for mapping, candidate_kind in candidates:
-            if candidate_kind == kind:
-                return mapping, kind
-
-    # Non-standard fallback allowed by the recommendation.
-    pvt = _sequence_from_groups(ds, frame_index, "PixelValueTransformationSequence")
-    if pvt:
-        item = pvt[0]
-        kind = str(getattr(item, "RescaleType", "")).strip().upper()
-        if kind in {"BQML", "GML", "CM2ML"} and hasattr(item, "RescaleSlope") and hasattr(item, "RescaleIntercept"):
-            if kind == "GML":
-                kind = _gml_suv_type(ds)
-            elif kind == "CM2ML":
-                kind = "BSA"
-            return item, kind
-
-    raise DataStructureError(
-        "Enhanced PET frame has no Real World Value Mapping Sequence or "
-        "Pixel Value Transformation Sequence sufficient for conversion to SUV or Bq/ml."
-    )
-
-
-def _apply_real_world_mapping(values, mapping):
-    if hasattr(mapping, "RealWorldValueLUTData"):
-        lut = np.asarray(mapping.RealWorldValueLUTData, dtype=float)
-        first = getattr(mapping, "RealWorldValueFirstValueMapped", None)
-        if first is None:
-            first = getattr(mapping, "DoubleFloatRealWorldValueFirstValueMapped", None)
-        if first is None:
-            raise DataStructureError("Real World Value LUT Data has no first mapped value.")
-        indices = np.asarray(values, dtype=np.int64) - int(first)
-        if np.any(indices < 0) or np.any(indices >= len(lut)):
-            raise DataStructureError("Stored pixel value is outside the Real World Value LUT range.")
-        return lut[indices]
-    try:
-        slope = float(mapping.RealWorldValueSlope)
-        intercept = float(mapping.RealWorldValueIntercept)
-    except (AttributeError, TypeError, ValueError):
-        # Pixel Value Transformation uses the corresponding rescale names.
-        try:
-            slope = float(mapping.RescaleSlope)
-            intercept = float(mapping.RescaleIntercept)
-        except (AttributeError, TypeError, ValueError):
-            raise DataStructureError("Real-world rescale slope or intercept is invalid.")
-    return np.asarray(values, dtype=float) * slope + intercept
-
-
-def _enhanced_suv_factor(ds, kind):
-    if kind == "BW":
-        return 1.0
-    weight = _patient_weight_kg(ds)
-    height = get_patient_height_cm(ds)
-    if kind == "BSA":
-        normalization = calculate_bsa_du_bois(height, weight) * 10.0
-    else:
-        sex = get_patient_sex(ds)
-        if kind == "IBW":
-            normalization = calculate_ibw(height, sex)
-        else:
-            calculators = {
-                "LBM": calculate_lbm_morgan,
-                "LBMJAMES128": calculate_lbm_james128,
-                "LBMJANMA": calculate_lbm_janmahasatian,
-            }
-            normalization = calculators[kind](height, weight, sex)
-    return weight / normalization
-
-
-def _enhanced_datetime(ds, value):
-    parsed = parse_time(value, "DT")
-    if parsed.tzinfo is not None:
-        return parsed
-
-    dataset_timezone = _dataset_timezone(ds)
-    if dataset_timezone is None:
-        return parsed
-    return parsed.replace(tzinfo=dataset_timezone)
-
-
-def _enhanced_decay_reference(ds, frame_index, half_life):
-    corrected = str(_attribute_from_groups(ds, frame_index, "DecayCorrected", "")).strip().upper()
-    if corrected not in {"YES", "NO"}:
-        raise DataStructureError("Decay Corrected (0018,9758) must be YES or NO.")
-    if corrected == "YES":
-        value = _attribute_from_groups(ds, frame_index, "DecayCorrectionDateTime")
-        if value in [None, ""]:
-            raise DataStructureError("Decay Correction DateTime (0018,9701) is required.")
-        return _enhanced_datetime(ds, value)
-
-    value = _attribute_from_groups(ds, frame_index, "FrameReferenceDateTime")
-    if value not in [None, ""]:
-        return _enhanced_datetime(ds, value)
-    acquisition = _attribute_from_groups(ds, frame_index, "FrameAcquisitionDateTime")
-    duration = _attribute_from_groups(ds, frame_index, "FrameAcquisitionDuration")
-    if acquisition in [None, ""] or duration in [None, ""]:
-        raise DataStructureError("Frame Reference DateTime or frame acquisition datetime and duration are required.")
-    duration_seconds = float(duration) / 1000.0
-    if duration_seconds < 0:
-        raise DataStructureError("Frame Acquisition Duration must be non-negative.")
-    if duration_seconds == 0:
-        average_offset = 0.0
-    else:
-        decay_constant = np.log(2) / half_life
-        x = decay_constant * duration_seconds
-        average_offset = np.log(x / -np.expm1(-x)) / decay_constant
-    return _enhanced_datetime(ds, acquisition) + timedelta(seconds=average_offset)
-
-
-def _enhanced_injection_datetime(ds, reference, half_life):
-    rph_sequence = getattr(ds, "RadiopharmaceuticalInformationSequence", None)
-    if not rph_sequence:
-        raise DataStructureError("Radiopharmaceutical Information Sequence is missing.")
-    value = getattr(rph_sequence[0], "RadiopharmaceuticalStartDateTime", None)
-    if value in [None, ""]:
-        raise DataStructureError("Radiopharmaceutical Start DateTime (0018,1078) is required.")
-    try:
-        injection = _enhanced_datetime(ds, value)
-    except (TypeError, ValueError):
-        raise DataStructureError("Radiopharmaceutical Start DateTime (0018,1078) is invalid.")
-    if (reference.tzinfo is None) != (injection.tzinfo is None):
-        if reference.tzinfo is None:
-            injection = injection.replace(tzinfo=None)
-        else:
-            injection = injection.replace(tzinfo=reference.tzinfo)
-    offset = (reference - injection).total_seconds()
-    if -3600 <= offset < 2 * half_life:
-        return injection
-    if half_life >= 41400:
-        raise DataStructureError("Administration datetime is inconsistent for a long-lived radionuclide.")
-    injection = injection.replace(year=reference.year, month=reference.month, day=reference.day)
-    clock_offset = (reference.replace(tzinfo=None) - injection.replace(tzinfo=None)).total_seconds()
-    if clock_offset < -3600:
-        injection -= timedelta(days=1)
-    reconstructed_offset = (reference - injection).total_seconds()
-    if not -3600 <= reconstructed_offset < 2 * half_life:
-        raise DataStructureError(
-            "Reconstructed administration datetime is inconsistent with the decay-correction reference datetime."
-        )
-    return injection
-
-
-def _apply_enhanced_suv_correction(ds, suv_image):
-    pixels = np.asarray(ds.pixel_array)
-    frames = pixels[np.newaxis, ...] if pixels.ndim == 2 else pixels
-    output = np.empty(frames.shape, dtype=float)
-
-    for frame_index, stored_values in enumerate(frames):
-        mapping, kind = _select_enhanced_mapping(ds, frame_index)
-        values = _apply_real_world_mapping(stored_values, mapping)
-        if kind == "BQML":
-            weight = _patient_weight_kg(ds)
-            half_life = get_radionuclide_half_life(ds)
-            reference = _enhanced_decay_reference(ds, frame_index, half_life)
-            injection = _enhanced_injection_datetime(ds, reference, half_life)
-            dose = float(ds.RadiopharmaceuticalInformationSequence[0].RadionuclideTotalDose)
-            if dose <= 0:
-                raise DataStructureError("Radionuclide Total Dose must be > 0.")
-            decayed_dose = dose * np.exp(-np.log(2) * (reference - injection).total_seconds() / half_life)
-            values = values / (decayed_dose / (weight * 1000.0))
-        else:
-            values = values * _enhanced_suv_factor(ds, kind)
-        output[frame_index] = values
-
-    corrected = sitk.GetImageFromArray(output)
-    corrected.CopyInformation(suv_image)
-    return corrected
-
-
 def validate_pet_dicom_tags(dicom_files):
+    reject_unsupported_enhanced_pet(dicom_files)
+
     for dcm_file in dicom_files:
         ds = dcm_file["ds"]
         image_id = dcm_file["file_path"]
-
-        if _is_enhanced_pet(ds):
-            number_of_frames = int(getattr(ds, "NumberOfFrames", 1))
-            for frame_index in range(number_of_frames):
-                _mapping, kind = _select_enhanced_mapping(ds, frame_index)
-                if kind == "BQML":
-                    half_life = get_radionuclide_half_life(ds)
-                    reference = _enhanced_decay_reference(ds, frame_index, half_life)
-                    _enhanced_injection_datetime(ds, reference, half_life)
-                    _patient_weight_kg(ds)
-                else:
-                    _enhanced_suv_factor(ds, kind)
-            continue
 
         try:
             pat_weight = ds[(0x0010, 0x1030)].value
@@ -974,9 +704,7 @@ def validate_pet_dicom_tags(dicom_files):
 
 
 def apply_suv_correction(dicom_files, suv_image):
-    if len(dicom_files) == 1 and _is_enhanced_pet(dicom_files[0]["ds"]):
-        ds = pydicom.dcmread(dicom_files[0]["file_path"])
-        return _apply_enhanced_suv_correction(ds, suv_image)
+    reject_unsupported_enhanced_pet(dicom_files)
 
     def process_single_slice(dicom_file_path):
         ds = pydicom.dcmread(dicom_file_path)

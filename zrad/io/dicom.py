@@ -8,7 +8,7 @@ from pydicom.errors import InvalidDicomError
 from skimage import draw
 
 from ..exceptions import DataStructureError, DataStructureWarning
-from .pet_suv import apply_suv_correction, validate_pet_dicom_tags
+from .pet_suv import apply_suv_correction, reject_unsupported_enhanced_pet, validate_pet_dicom_tags
 
 
 def read_dicom_image(dicom_dir, modality):
@@ -18,19 +18,15 @@ def read_dicom_image(dicom_dir, modality):
         raise DataStructureError(f"No {modality} data found in {dicom_dir}. Patient skipped.")
 
     image = None
-    enhanced_pet = (
-        modality == "PET"
-        and len(dicom_files) == 1
-        and str(getattr(dicom_files[0]["ds"], "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.130"
-    )
-    if modality in ["CT", "MRI", "PET"] and not enhanced_pet:
+    if modality == "PET":
+        validate_pet_dicom_tags(dicom_files)
+    if modality in ["CT", "MRI", "PET"]:
         validate_z_spacing(dicom_files)
     if modality == "US":
         validate_ultrasound_dicom_tags(dicom_files)
     if modality in ["CT", "MRI", "PET", "MG", "US"]:
         image = process_dicom_series(dicom_files, modality)
     if modality == "PET":
-        validate_pet_dicom_tags(dicom_files)
         image = apply_suv_correction(dicom_files, image)
     if modality == "RTDOSE":
         image = read_dicom_dose(dicom_files[0]["file_path"])
@@ -183,10 +179,9 @@ def get_dicom_files(directory, modality):
             )
 
         dicom_files_info = filtered
-    enhanced_pet = any(
-        str(getattr(item["ds"], "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.130" for item in dicom_files_info
-    )
-    if modality_dicom in ["CT", "PT", "MR"] and not enhanced_pet:
+    if modality_dicom == "PT":
+        reject_unsupported_enhanced_pet(dicom_files_info)
+    if modality_dicom in ["CT", "PT", "MR"]:
         dicom_files_info = remove_duplicate_slices(dicom_files_info)
         dicom_files_info = sort_by_geometric_position(dicom_files_info)
     return dicom_files_info
@@ -238,18 +233,6 @@ def modality_mapping(modality):
 
 
 def process_dicom_series(dicom_files, modality):
-    enhanced_pet = (
-        modality == "PET"
-        and len(dicom_files) == 1
-        and str(getattr(dicom_files[0]["ds"], "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.130"
-    )
-    if enhanced_pet:
-        # Enhanced PET is a single multi-frame object.  GDCM obtains its
-        # geometry from the functional groups; the classic-series code below
-        # expects top-level, one-frame geometry attributes and must not replace
-        # it.
-        return sitk.ReadImage(dicom_files[0]["file_path"])
-
     if modality in ["CT", "MRI", "PET", "MG"]:
         reader = sitk.ImageSeriesReader()
         file_names = [i["file_path"] for i in dicom_files]

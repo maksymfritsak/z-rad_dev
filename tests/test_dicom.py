@@ -22,7 +22,7 @@ def _make_sitk_image(size=(5, 5, 3)):
 
 
 @pytest.mark.unit
-def test_get_dicom_files_does_not_sort_enhanced_pet_by_top_level_geometry(monkeypatch, tmp_path):
+def test_get_dicom_files_rejects_enhanced_pet_before_geometry_sorting(monkeypatch, tmp_path):
     enhanced_pet = Dataset()
     enhanced_pet.Modality = "PT"
     enhanced_pet.SOPClassUID = "1.2.840.10008.5.1.4.1.1.130"
@@ -42,14 +42,8 @@ def test_get_dicom_files_does_not_sort_enhanced_pet_by_top_level_geometry(monkey
 
     monkeypatch.setattr(dicom, "sort_by_geometric_position", fail_if_sorted)
 
-    files = dicom.get_dicom_files(str(tmp_path), "PET")
-
-    assert files == [
-        {
-            "file_path": str(tmp_path / "enhanced-pet.dcm"),
-            "ds": enhanced_pet,
-        }
-    ]
+    with pytest.raises(DataStructureError, match="Enhanced PET Image Storage is not supported"):
+        dicom.get_dicom_files(str(tmp_path), "PET")
 
 
 def _contour(x, y, z, contour_type="CLOSED_PLANAR"):
