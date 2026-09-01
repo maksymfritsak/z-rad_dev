@@ -442,7 +442,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
             day=injection_datetime.day,
         )
 
-        if injection_time.time() > acquisition_time.time():
+        if injection_time > acquisition_time:
             acquisition_time += timedelta(days=1)
 
             if (acquisition_time - injection_time).total_seconds() >= 6 * 3600:
@@ -469,7 +469,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
             day=acquisition_date.day,
         )
 
-        if injection_time.time() > acquisition_time.time():
+        if injection_time > acquisition_time:
             injection_time -= timedelta(days=1)
 
             if (acquisition_time - injection_time).total_seconds() >= 6 * 3600:
@@ -484,7 +484,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
     injection_time = injection_clock
     acquisition_time = acquisition_clock
 
-    if injection_time.time() > acquisition_time.time():
+    if injection_time > acquisition_time:
         injection_time -= timedelta(days=1)
 
         if (acquisition_time - injection_time).total_seconds() >= 6 * 3600:
