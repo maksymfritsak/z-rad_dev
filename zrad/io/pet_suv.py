@@ -8,11 +8,14 @@ import SimpleITK as sitk
 
 from ..exceptions import DataStructureError, DataStructureWarning
 
-ENHANCED_PET_SOP_CLASS_UID = "1.2.840.10008.5.1.4.1.1.130"
+UNSUPPORTED_ENHANCED_PET_SOP_CLASS_UIDS = {
+    "1.2.840.10008.5.1.4.1.1.130",  # Enhanced PET Image Storage
+    "1.2.840.10008.5.1.4.1.1.128.1",  # Legacy Converted Enhanced PET Image Storage
+}
 
 
 def _is_enhanced_pet(ds):
-    return str(getattr(ds, "SOPClassUID", "")) == ENHANCED_PET_SOP_CLASS_UID
+    return str(getattr(ds, "SOPClassUID", "")) in UNSUPPORTED_ENHANCED_PET_SOP_CLASS_UIDS
 
 
 def reject_unsupported_enhanced_pet(dicom_files):
@@ -26,6 +29,38 @@ def is_fdg(name):
         re.IGNORECASE,
     )
     return bool(fdg_pattern.search(name))
+
+
+def _finite_positive(value, name):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise DataStructureError(f"{name} is missing or invalid.")
+    if not np.isfinite(number) or number <= 0:
+        raise DataStructureError(f"{name} must be finite and > 0.")
+    return number
+
+
+def _finite_nonnegative(value, name):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise DataStructureError(f"{name} is missing or invalid.")
+    if not np.isfinite(number) or number < 0:
+        raise DataStructureError(f"{name} must be finite and >= 0.")
+    return number
+
+
+def _single_radiopharmaceutical_item(ds):
+    sequence = getattr(ds, "RadiopharmaceuticalInformationSequence", None)
+    if sequence is None or len(sequence) == 0:
+        raise DataStructureError("Radiopharmaceutical Information Sequence (0054,0016) is missing or empty.")
+    if len(sequence) != 1:
+        raise DataStructureError(
+            "Multiple Radiopharmaceutical Information Sequence (0054,0016) items are not supported because "
+            "the applicable administration cannot be identified."
+        )
+    return sequence[0]
 
 
 def parse_time(time_str, vr=None):
@@ -68,6 +103,8 @@ def parse_time(time_str, vr=None):
         raise ValueError(f"Time data '{time_str}' has fractional seconds without a seconds component")
     if offset and vr != "DT":
         raise ValueError(f"Time data '{time_str}' has a UTC offset but is not a DICOM DT value")
+    if offset:
+        _parse_utc_offset(offset)
 
     fmt = formats[vr][len(components)]
     if fraction:
@@ -77,27 +114,40 @@ def parse_time(time_str, vr=None):
     return datetime.strptime(components + fraction + offset, fmt)
 
 
-def _dataset_timezone(ds):
-    dataset_offset = getattr(ds, "TimezoneOffsetFromUTC", None)
-    if dataset_offset in [None, ""]:
-        return None
-    match = re.fullmatch(
-        r"(?P<sign>[+-])(?P<hours>\d{2})(?P<minutes>\d{2})",
-        str(dataset_offset).strip(),
-    )
-    if match is None:
-        raise DataStructureError("Timezone Offset From UTC (0008,0201) is invalid.")
+def _parse_utc_offset(value):
+    match = re.fullmatch(r"(?P<sign>[+-])(?P<hours>\d{2})(?P<minutes>\d{2})", str(value).strip())
+    if match is None or str(value).strip() == "-0000":
+        raise ValueError("Invalid DICOM UTC offset")
+
+    hours = int(match.group("hours"))
     minutes = int(match.group("minutes"))
-    total_minutes = int(match.group("hours")) * 60 + minutes
+    total_minutes = hours * 60 + minutes
     if (
         minutes >= 60
         or (match.group("sign") == "+" and total_minutes > 14 * 60)
         or (match.group("sign") == "-" and total_minutes > 12 * 60)
     ):
-        raise DataStructureError("Timezone Offset From UTC (0008,0201) is invalid.")
+        raise ValueError("Invalid DICOM UTC offset")
     if match.group("sign") == "-":
         total_minutes = -total_minutes
     return timezone(timedelta(minutes=total_minutes))
+
+
+def _time_component_width(value):
+    if isinstance(value, bytes):
+        value = value.decode("utf-8").strip()
+    match = re.match(r"\d+", str(value).strip())
+    return len(match.group()) if match is not None else 0
+
+
+def _dataset_timezone(ds):
+    dataset_offset = getattr(ds, "TimezoneOffsetFromUTC", None)
+    if dataset_offset in [None, ""]:
+        return None
+    try:
+        return _parse_utc_offset(dataset_offset)
+    except ValueError:
+        raise DataStructureError("Timezone Offset From UTC (0008,0201) is invalid.")
 
 
 def _datetime_on_reference_date(value, reference, infer_previous_day=True):
@@ -122,17 +172,11 @@ def _datetime_on_reference_date(value, reference, infer_previous_day=True):
 
 def get_radionuclide_half_life(ds):
     """Return radionuclide half-life in seconds."""
-    rph = ds.RadiopharmaceuticalInformationSequence[0]
-
-    try:
-        half_life = float(rph.RadionuclideHalfLife)
-    except (AttributeError, TypeError, ValueError):
-        raise DataStructureError("Radionuclide Half Life (0018,1075) is missing or invalid.")
-
-    if half_life <= 0:
-        raise DataStructureError("Radionuclide Half Life (0018,1075) must be > 0.")
-
-    return half_life
+    rph = _single_radiopharmaceutical_item(ds)
+    return _finite_positive(
+        getattr(rph, "RadionuclideHalfLife", None),
+        "Radionuclide Half Life (0018,1075)",
+    )
 
 
 def get_decay_correction_reference_datetime(ds, acquisition_time, decay_constant):
@@ -164,6 +208,8 @@ def get_decay_correction_reference_datetime(ds, acquisition_time, decay_constant
     if series_time is not None and acquisition_time == series_time:
         return acquisition_time
 
+    # Preserve the vendor-specific START strategies in one shared resolver so
+    # validation and SUV application cannot choose different timestamps.
     if "SIEMENS" in manufacturer or "CPS" in manufacturer or "CTI" in manufacturer:
         try:
             return _datetime_on_reference_date(ds[(0x0071, 0x1022)].value, acquisition_time)
@@ -174,14 +220,40 @@ def get_decay_correction_reference_datetime(ds, acquisition_time, decay_constant
         try:
             return _datetime_on_reference_date(ds[(0x0009, 0x100D)].value, acquisition_time)
         except (KeyError, TypeError, ValueError):
-            frame_reference_time = float(ds.FrameReferenceTime) / 1000.0
+            frame_reference_time = (
+                _finite_nonnegative(
+                    ds.FrameReferenceTime,
+                    "Frame Reference Time (0054,1300)",
+                )
+                / 1000.0
+            )
             return acquisition_time - timedelta(seconds=frame_reference_time)
 
-    frame_reference_time = float(ds.FrameReferenceTime) / 1000.0
-    decay_during_frame = decay_constant * float(ds.ActualFrameDuration) / 1000.0
+    frame_reference_time = (
+        _finite_nonnegative(
+            ds.FrameReferenceTime,
+            "Frame Reference Time (0054,1300)",
+        )
+        / 1000.0
+    )
+    frame_duration = _finite_positive(
+        ds.ActualFrameDuration,
+        "Actual Frame Duration (0018,1242)",
+    )
+    decay_during_frame = decay_constant * frame_duration / 1000.0
     avg_count_rate_time = (1 / decay_constant) * np.log(decay_during_frame / (1 - np.exp(-decay_during_frame)))
 
     return acquisition_time + timedelta(seconds=avg_count_rate_time - frame_reference_time)
+
+
+def calc_start_elapsed_time(ds, decay_constant, acquisition_time, injection_time):
+    """Return elapsed time using the shared vendor-specific START strategy."""
+    decay_reference_time = get_decay_correction_reference_datetime(
+        ds,
+        acquisition_time,
+        decay_constant,
+    )
+    return (decay_reference_time - injection_time).total_seconds()
 
 
 def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
@@ -201,7 +273,7 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
     For long-lived radionuclides, dates must be trustworthy because uptake may
     legitimately span more than one day.
     """
-    rph = ds.RadiopharmaceuticalInformationSequence[0]
+    rph = _single_radiopharmaceutical_item(ds)
 
     injection_datetime_value = getattr(rph, "RadiopharmaceuticalStartDateTime", None)
     injection_time_value = getattr(rph, "RadiopharmaceuticalStartTime", None)
@@ -224,19 +296,38 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
         except (ValueError, TypeError):
             raise DataStructureError("Radiopharmaceutical Start DateTime (0018,1078) is invalid.")
 
+        datetime_component_width = _time_component_width(injection_datetime_value)
+        if datetime_component_width < 8:
+            raise DataStructureError("Radiopharmaceutical Start DateTime (0018,1078) does not contain a complete date.")
+        if datetime_component_width < 14 and not injection_time_present:
+            raise DataStructureError(
+                "Radiopharmaceutical Start DateTime (0018,1078) does not contain a complete time, and "
+                "Radiopharmaceutical Start Time (0018,1072) is missing."
+            )
+
     if injection_time_present:
-        injection_clock = parse_time(injection_time_value, "TM")
+        try:
+            injection_clock = parse_time(injection_time_value, "TM")
+        except (ValueError, TypeError):
+            raise DataStructureError("Radiopharmaceutical Start Time (0018,1072) is invalid.")
+        if _time_component_width(injection_time_value) < 6:
+            raise DataStructureError("Radiopharmaceutical Start Time (0018,1072) does not contain a complete time.")
     else:
         injection_clock = injection_datetime
 
-    acquisition_clock = parse_time(ds.AcquisitionTime, "TM")
+    try:
+        acquisition_clock = parse_time(ds.AcquisitionTime, "TM")
+    except (AttributeError, ValueError, TypeError):
+        raise DataStructureError("Acquisition Time (0008,0032) is missing or invalid.")
+    if _time_component_width(ds.AcquisitionTime) < 6:
+        raise DataStructureError("Acquisition Time (0008,0032) does not contain a complete time.")
     dataset_timezone = _dataset_timezone(ds)
     if injection_datetime is not None and injection_datetime.tzinfo is None and dataset_timezone is not None:
         injection_datetime = injection_datetime.replace(tzinfo=dataset_timezone)
     if injection_clock.tzinfo is None:
-        injection_timezone = dataset_timezone
-        if injection_timezone is None and injection_datetime is not None:
-            injection_timezone = injection_datetime.tzinfo
+        injection_timezone = injection_datetime.tzinfo if injection_datetime is not None else None
+        if injection_timezone is None:
+            injection_timezone = dataset_timezone
         if injection_timezone is not None:
             injection_clock = injection_clock.replace(tzinfo=injection_timezone)
     if acquisition_clock.tzinfo is None:
@@ -247,6 +338,15 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
             acquisition_timezone = injection_datetime.tzinfo
         if acquisition_timezone is not None:
             acquisition_clock = acquisition_clock.replace(tzinfo=acquisition_timezone)
+
+    # A truncated DT defaults omitted fields to zero when parsed. Never treat
+    # those defaults as the administration time; use the separately encoded TM.
+    if injection_datetime is not None and datetime_component_width < 14:
+        injection_datetime = injection_clock.replace(
+            year=injection_datetime.year,
+            month=injection_datetime.month,
+            day=injection_datetime.day,
+        )
 
     # According to the DRO recommendations, long-lived radionuclides require
     # a reliable full administration datetime because uptake can exceed 24 h.
@@ -398,8 +498,18 @@ def resolve_injection_and_acquisition_times(ds, half_life, decay_constant):
 
 
 def calc_elapsed_time(ds, decay_constant, acquisition_time, injection_time):
-    frame_reference_time = float(ds.FrameReferenceTime) / 1000
-    decay_during_frame = decay_constant * ds.ActualFrameDuration / 1000
+    frame_reference_time = (
+        _finite_nonnegative(
+            ds.FrameReferenceTime,
+            "Frame Reference Time (0054,1300)",
+        )
+        / 1000
+    )
+    frame_duration = _finite_positive(
+        ds.ActualFrameDuration,
+        "Actual Frame Duration (0018,1242)",
+    )
+    decay_during_frame = decay_constant * frame_duration / 1000
     avg_count_rate_time = (1 / decay_constant) * np.log(decay_during_frame / (1 - np.exp(-decay_during_frame)))
 
     return (acquisition_time - injection_time).total_seconds() + avg_count_rate_time - frame_reference_time
@@ -553,13 +663,10 @@ def get_gml_normalization_info(ds):
     """Parse GML SUV normalization metadata and compute the normalization factor."""
     suv_type = _gml_suv_type(ds)
 
-    try:
-        patient_weight = float(ds.PatientWeight)
-    except Exception:
-        raise DataStructureError("Patient weight tag is missing or invalid for GML normalization.")
-
-    if patient_weight <= 0:
-        raise DataStructureError("Patient weight must be > 0 for GML normalization.")
+    patient_weight = _finite_positive(
+        getattr(ds, "PatientWeight", None),
+        "Patient weight for GML normalization",
+    )
 
     if suv_type == "BW":
         return suv_type, patient_weight
@@ -586,25 +693,26 @@ def validate_pet_dicom_tags(dicom_files):
         ds = dcm_file["ds"]
         image_id = dcm_file["file_path"]
 
-        try:
-            pat_weight = ds[(0x0010, 0x1030)].value
-            if float(pat_weight) < 1:
-                warning_msg = f"For patient's {image_id} image, patient's weight tag (0071, 1022) contains weight < 1kg. Patient is excluded from the analysis."
-                warnings.warn(warning_msg, DataStructureWarning)
-
-        except (KeyError, TypeError):
-            warning_msg = f"For patient's {image_id} image, patient's weight tag (0071, 1022) is not present. Patient is excluded from the analysis."
+        patient_weight = _finite_positive(
+            getattr(ds, "PatientWeight", None),
+            "Patient Weight (0010,1030)",
+        )
+        if patient_weight < 1:
+            warning_msg = f"For patient's {image_id} image, patient's weight tag (0010,1030) contains weight < 1kg. Patient is excluded from the analysis."
             warnings.warn(warning_msg, DataStructureWarning)
-        if pat_weight <= 0:
-            raise DataStructureError("Patient weight must be > 0.")
         if "DECY" not in ds[(0x0028, 0x0051)].value or "ATTN" not in ds[(0x0028, 0x0051)].value:
             warning_msg = f"For patient's {image_id} image, in DICOM tag (0028, 0051) either no 'DECY' (decay correction) or 'ATTN' (attenuation correction). Patient is excluded from the analysis."
             warnings.warn(warning_msg, DataStructureWarning)
         if ds.Units == "BQML":
-            half_life = get_radionuclide_half_life(ds)
-            decay_constant = np.log(2) / half_life
+            rph = _single_radiopharmaceutical_item(ds)
+            _finite_positive(
+                getattr(rph, "RadionuclideTotalDose", None),
+                "Radionuclide Total Dose (0018,1074)",
+            )
 
             if ds.DecayCorrection != "ADMIN":
+                half_life = get_radionuclide_half_life(ds)
+                decay_constant = np.log(2) / half_life
                 injection_time, acquisition_time = resolve_injection_and_acquisition_times(
                     ds,
                     half_life,
@@ -612,48 +720,14 @@ def validate_pet_dicom_tags(dicom_files):
                 )
 
             if ds.DecayCorrection == "START":
-                if "PHILIPS" in ds.Manufacturer.upper():
-                    elapsed_time = calc_elapsed_time(
-                        ds,
-                        decay_constant,
-                        acquisition_time,
-                        injection_time,
-                    )
-                elif (
-                    "SIEMENS" in ds.Manufacturer.upper()
-                    or "CPS" in ds.Manufacturer.upper()
-                    or "CTI" in ds.Manufacturer.upper()
-                ):
-                    try:
-                        elapsed_time = (
-                            _datetime_on_reference_date(ds[(0x0071, 0x1022)].value, acquisition_time) - injection_time
-                        ).total_seconds()
-
-                    except (KeyError, TypeError):
-                        elapsed_time = calc_elapsed_time(
-                            ds,
-                            decay_constant,
-                            acquisition_time,
-                            injection_time,
-                        )
-                elif "GE" in ds.Manufacturer.upper():
-                    try:
-                        elapsed_time = (
-                            _datetime_on_reference_date(ds[(0x0009, 0x100D)].value, acquisition_time) - injection_time
-                        ).total_seconds()
-
-                    except (KeyError, TypeError):
-                        frame_reference_time = float(ds.FrameReferenceTime) / 1000
-
-                        elapsed_time = (acquisition_time - injection_time).total_seconds() - frame_reference_time
-                else:
-                    elapsed_time = calc_elapsed_time(
-                        ds,
-                        decay_constant,
-                        acquisition_time,
-                        injection_time,
-                    )
-
+                elapsed_time = calc_start_elapsed_time(
+                    ds,
+                    decay_constant,
+                    acquisition_time,
+                    injection_time,
+                )
+                manufacturer = ds.Manufacturer.upper()
+                if not any(vendor in manufacturer for vendor in ("PHILIPS", "SIEMENS", "CPS", "CTI", "GE")):
                     warning_msg = f"For patient's {image_id} image, an unknown PET scaner manufacturer is present {ds.Manufacturer}. Siemens/Philips strategy is applied."
                     warnings.warn(warning_msg, DataStructureWarning)
 
@@ -676,12 +750,13 @@ def validate_pet_dicom_tags(dicom_files):
                 warning_msg = f"Only {abs(elapsed_time) / 60} minutes after the injection."
                 warnings.warn(warning_msg, DataStructureWarning)
         elif ds.Units == "CNTS" and "PHILIPS" in ds.Manufacturer.upper():
-            if not (
-                ((0x7053, 0x1009) in ds and ds[(0x7053, 0x1009)].value != 0)
-                or ((0x7053, 0x1000) in ds and ds[(0x7053, 0x1000)].value != 0)
-            ):
+            has_bqml_scale = (0x7053, 0x1009) in ds
+            has_direct_scale = ds.DecayCorrection != "NONE" and (0x7053, 0x1000) in ds
+            if not has_bqml_scale and not has_direct_scale:
                 error_msg = f"For patient's {image_id} image, patient is excluded, Philips scale factors not present (PET units CNTS)"
                 raise DataStructureError(error_msg)
+            scale_tag = (0x7053, 0x1009) if has_bqml_scale else (0x7053, 0x1000)
+            _finite_positive(ds[scale_tag].value, f"Philips scale factor {scale_tag}")
         elif ds.Units == "GML":
             try:
                 _suv_type, _factor = get_gml_normalization_info(ds)
@@ -723,56 +798,6 @@ def apply_suv_correction(dicom_files, suv_image):
                 value = rph_item[(0x0018, 0x0031)].value
             return str(value) if value is not None else None
 
-        def get_datetime_on_acquisition_day(time_value, acquisition_time):
-            return _datetime_on_reference_date(time_value, acquisition_time)
-
-        def compute_elapsed_time_for_start_decay_correction(
-            ds,
-            injection_time,
-            acquisition_time,
-            decay_constant,
-        ):
-            manufacturer = ds.Manufacturer.upper()
-
-            series_time = get_datetime_on_acquisition_day(
-                ds.SeriesTime,
-                acquisition_time,
-            )
-
-            if "PHILIPS" in manufacturer:
-                if acquisition_time == series_time:
-                    return (acquisition_time - injection_time).total_seconds()
-                return calc_elapsed_time(ds, decay_constant, acquisition_time, injection_time)
-
-            if "SIEMENS" in manufacturer or "CPS" in manufacturer or "CTI" in manufacturer:
-                try:
-                    private_time = get_datetime_on_acquisition_day(
-                        ds[(0x0071, 0x1022)].value,
-                        acquisition_time,
-                    )
-                    return (private_time - injection_time).total_seconds()
-                except (KeyError, TypeError):
-                    if acquisition_time == series_time:
-                        return (acquisition_time - injection_time).total_seconds()
-                    return calc_elapsed_time(ds, decay_constant, acquisition_time, injection_time)
-
-            if "GE" in manufacturer:
-                try:
-                    private_time = get_datetime_on_acquisition_day(
-                        ds[(0x0009, 0x100D)].value,
-                        acquisition_time,
-                    )
-                    return (private_time - injection_time).total_seconds()
-                except (KeyError, TypeError):
-                    if acquisition_time == series_time:
-                        return (acquisition_time - injection_time).total_seconds()
-                    frame_reference_time = float(ds.FrameReferenceTime) / 1000.0
-                    return (acquisition_time - injection_time).total_seconds() - frame_reference_time
-
-            if acquisition_time == series_time:
-                return (acquisition_time - injection_time).total_seconds()
-            return calc_elapsed_time(ds, decay_constant, acquisition_time, injection_time)
-
         def process_gml(pixel_array_units, ds):
             suv_type, factor = get_gml_normalization_info(ds)
             patient_weight = float(ds.PatientWeight)
@@ -794,9 +819,15 @@ def apply_suv_correction(dicom_files, suv_image):
             return pixel_array_units * (patient_weight / (bsa_m2 * 10.0))
 
         def process_bqml(activity_concentration, ds):
-            rph = ds.RadiopharmaceuticalInformationSequence[0]
-            patient_weight = float(ds.PatientWeight)
-            injected_dose = float(rph.RadionuclideTotalDose)
+            rph = _single_radiopharmaceutical_item(ds)
+            patient_weight = _finite_positive(
+                getattr(ds, "PatientWeight", None),
+                "Patient Weight (0010,1030)",
+            )
+            injected_dose = _finite_positive(
+                getattr(rph, "RadionuclideTotalDose", None),
+                "Radionuclide Total Dose (0018,1074)",
+            )
 
             tracer_name = get_tracer_name(rph)
             if tracer_name is not None and is_fdg(tracer_name) and injected_dose < 10000:
@@ -806,16 +837,13 @@ def apply_suv_correction(dicom_files, suv_image):
                     DataStructureWarning,
                 )
 
-            if injected_dose <= 0:
-                raise DataStructureError("The injected PET tracer dose is zero.")
-
-            half_life = get_radionuclide_half_life(ds)
-            decay_constant = np.log(2) / half_life
             decay_correction = ds.DecayCorrection
 
             if decay_correction == "ADMIN":
                 return activity_concentration / (injected_dose / (patient_weight * 1000))
 
+            half_life = get_radionuclide_half_life(ds)
+            decay_constant = np.log(2) / half_life
             injection_time, acquisition_time = resolve_injection_and_acquisition_times(
                 ds,
                 half_life,
@@ -823,18 +851,22 @@ def apply_suv_correction(dicom_files, suv_image):
             )
 
             if decay_correction == "START":
-                elapsed_time = compute_elapsed_time_for_start_decay_correction(
+                elapsed_time = calc_start_elapsed_time(
                     ds,
-                    injection_time,
-                    acquisition_time,
                     decay_constant,
+                    acquisition_time,
+                    injection_time,
                 )
                 decay_factor = np.exp(-(np.log(2) * elapsed_time) / half_life)
                 decay_corrected_dose = injected_dose * decay_factor
                 return activity_concentration / (decay_corrected_dose / (patient_weight * 1000))
 
             if decay_correction == "NONE":
-                decay_during_frame = decay_constant * float(ds.ActualFrameDuration) / 1000.0
+                frame_duration = _finite_positive(
+                    ds.ActualFrameDuration,
+                    "Actual Frame Duration (0018,1242)",
+                )
+                decay_during_frame = decay_constant * frame_duration / 1000.0
                 avg_count_rate_time = (1 / decay_constant) * np.log(
                     decay_during_frame / (1 - np.exp(-decay_during_frame))
                 )
@@ -851,17 +883,26 @@ def apply_suv_correction(dicom_files, suv_image):
             if "PHILIPS" not in manufacturer:
                 raise DataStructureError(f"Vendor {ds.Manufacturer} is not supported with CNTS units!")
 
-            if (0x7053, 0x1009) in ds and ds[(0x7053, 0x1009)].value != 0:
-                activity_concentration_bqml = pixel_array_units * ds[(0x7053, 0x1009)].value
+            if (0x7053, 0x1009) in ds:
+                scale = _finite_positive(ds[(0x7053, 0x1009)].value, "Philips scale factor (7053,1009)")
+                activity_concentration_bqml = pixel_array_units * scale
                 return process_bqml(activity_concentration_bqml, ds)
 
-            if ds.DecayCorrection != "NONE" and (0x7053, 0x1000) in ds and ds[(0x7053, 0x1000)].value != 0:
-                return pixel_array_units * ds[(0x7053, 0x1000)].value
+            if ds.DecayCorrection != "NONE" and (0x7053, 0x1000) in ds:
+                scale = _finite_positive(ds[(0x7053, 0x1000)].value, "Philips scale factor (7053,1000)")
+                return pixel_array_units * scale
 
             raise DataStructureError("Philips-specific scaling factors not present!")
 
         units = ds.Units
-        pixel_array_units = (ds.pixel_array * ds.RescaleSlope) + ds.RescaleIntercept
+        rescale_slope = _finite_positive(ds.RescaleSlope, "Rescale Slope (0028,1053)")
+        try:
+            rescale_intercept = float(ds.RescaleIntercept)
+        except (TypeError, ValueError):
+            raise DataStructureError("Rescale Intercept (0028,1052) is missing or invalid.")
+        if not np.isfinite(rescale_intercept):
+            raise DataStructureError("Rescale Intercept (0028,1052) must be finite.")
+        pixel_array_units = (ds.pixel_array * rescale_slope) + rescale_intercept
 
         if units == "GML":
             suv = process_gml(pixel_array_units, ds)
