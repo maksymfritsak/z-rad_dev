@@ -752,9 +752,7 @@ def validate_pet_dicom_tags(dicom_files):
         elif ds.Units == "CNTS" and "PHILIPS" in ds.Manufacturer.upper():
             has_bqml_scale = (0x7053, 0x1009) in ds and ds[(0x7053, 0x1009)].value != 0
             has_direct_scale = (
-                ds.DecayCorrection != "NONE"
-                and (0x7053, 0x1000) in ds
-                and ds[(0x7053, 0x1000)].value != 0
+                ds.DecayCorrection != "NONE" and (0x7053, 0x1000) in ds and ds[(0x7053, 0x1000)].value != 0
             )
             if not has_bqml_scale and not has_direct_scale:
                 error_msg = f"For patient's {image_id} image, patient is excluded, Philips scale factors not present (PET units CNTS)"
@@ -892,11 +890,7 @@ def apply_suv_correction(dicom_files, suv_image):
                 activity_concentration_bqml = pixel_array_units * scale
                 return process_bqml(activity_concentration_bqml, ds)
 
-            if (
-                ds.DecayCorrection != "NONE"
-                and (0x7053, 0x1000) in ds
-                and ds[(0x7053, 0x1000)].value != 0
-            ):
+            if ds.DecayCorrection != "NONE" and (0x7053, 0x1000) in ds and ds[(0x7053, 0x1000)].value != 0:
                 scale = _finite_positive(ds[(0x7053, 0x1000)].value, "Philips scale factor (7053,1000)")
                 return pixel_array_units * scale
 
