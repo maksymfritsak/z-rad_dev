@@ -140,6 +140,9 @@ def get_dicom_files(directory, modality):
             warning_msg = f"An error occurred while processing file {file_path}: {str(e)}"
             warnings.warn(warning_msg, DataStructureWarning)
 
+    if modality_dicom == "PT":
+        reject_unsupported_enhanced_pet(dicom_files_info)
+
     if len(dicom_files_info) > 1:
         signatures = []
         for item in dicom_files_info:
@@ -179,8 +182,6 @@ def get_dicom_files(directory, modality):
             )
 
         dicom_files_info = filtered
-    if modality_dicom == "PT":
-        reject_unsupported_enhanced_pet(dicom_files_info)
     if modality_dicom in ["CT", "PT", "MR"]:
         dicom_files_info = remove_duplicate_slices(dicom_files_info)
         dicom_files_info = sort_by_geometric_position(dicom_files_info)
