@@ -239,30 +239,53 @@ class RieszLoG(LoG):
 
     def _aligned_second_order_response(self, image, log_response):
         sigma = self.structure_tensor_sigma_mm / self.res_mm
-        gradients = np.gradient(ndi.gaussian_filter(image, sigma=sigma, mode=self.padding_type))
+        first_order_responses = []
+        for axis in range(3):
+            order = [0, 0, 0]
+            order[axis] = 1
+            first_order_responses.append(self._boundary_aware_riesz_transform(image, order))
+
         tensor = np.empty(image.shape + (3, 3))
         for row in range(3):
             for column in range(row, 3):
-                value = ndi.gaussian_filter(gradients[row] * gradients[column], sigma=sigma, mode=self.padding_type)
+                value = ndi.gaussian_filter(
+                    first_order_responses[row] * first_order_responses[column],
+                    sigma=sigma,
+                    mode=self.padding_type,
+                )
                 tensor[..., row, column] = value
                 tensor[..., column, row] = value
-        direction = np.linalg.eigh(tensor)[1][..., -1]
+        eigenvectors = np.linalg.eigh(tensor)[1]
+        rotation = np.swapaxes(eigenvectors[..., ::-1], -1, -2)
+
+        target_axes = np.repeat(np.arange(3), self.riesz_order)
+        first_direction = rotation[..., target_axes[0], :]
+        second_direction = rotation[..., target_axes[1], :]
+        target_coefficient = np.sqrt(factorial(2) / np.prod([factorial(order) for order in self.riesz_order]))
 
         response = np.zeros_like(image)
         for row in range(3):
             order = [0, 0, 0]
             order[row] = 2
-            response += direction[..., row] ** 2 * self._boundary_aware_riesz_transform(log_response, order)
+            response += (
+                target_coefficient
+                * first_direction[..., row]
+                * second_direction[..., row]
+                * self._boundary_aware_riesz_transform(log_response, order)
+            )
             for column in range(row + 1, 3):
                 order = [0, 0, 0]
                 order[row] = order[column] = 1
                 response += (
-                    np.sqrt(2.0)
-                    * direction[..., row]
-                    * direction[..., column]
+                    target_coefficient
+                    / np.sqrt(2.0)
+                    * (
+                        first_direction[..., row] * second_direction[..., column]
+                        + first_direction[..., column] * second_direction[..., row]
+                    )
                     * self._boundary_aware_riesz_transform(log_response, order)
                 )
-        return np.abs(response)
+        return response
 
     def _apply_array(self, img):
         log_response = super()._apply_array(img)
