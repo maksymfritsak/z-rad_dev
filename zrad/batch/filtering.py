@@ -397,6 +397,11 @@ class BatchFilter:
                     raise InvalidInputParametersError(
                         'Structure-tensor alignment is supported for second-order 3D Riesz transforms only.'
                     )
+                if 2 not in self.riesz_order:
+                    raise InvalidInputParametersError(
+                        'Structure-tensor alignment supports pure second-order Riesz indices only; '
+                        'mixed-order indices have sign-ambiguous eigenvector steering.'
+                    )
             else:
                 self.structure_tensor_sigma_mm = None
         elif self.filter_type == 'Laws Kernels':
