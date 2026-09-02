@@ -168,6 +168,11 @@ class RieszLoG(LoG):
             raise ValueError('structure_tensor_sigma_mm must be a positive number.')
         if structure_tensor_sigma_mm is not None and (dimensions != 3 or sum(riesz_order) != 2):
             raise ValueError('Structure-tensor alignment is supported for second-order 3D Riesz transforms only.')
+        if structure_tensor_sigma_mm is not None and 2 not in riesz_order:
+            raise ValueError(
+                'Structure-tensor alignment supports pure second-order Riesz indices only; '
+                'mixed-order indices have sign-ambiguous eigenvector steering.'
+            )
 
         self.filtering_method = 'Riesz-transformed LoG'
         self.riesz_order = tuple(int(order) for order in riesz_order)
