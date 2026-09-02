@@ -24,6 +24,11 @@ This directory contains a collection of test data files from the **Image Biomark
 6. **IBSI 2 Reference Feature Values**  
    - **License:** CC0 1.0 Universal (Public Domain Dedication)
 
+7. **IBSI-SUV v3.0.1 Digital Reference Objects**
+   - **Source:** https://github.com/oncoray/suv_computation
+   - **Authors:** Michael Vácha, Alex Zwanenburg, and the Image Biomarker Standardisation Initiative
+   - **License:** Creative Commons Attribution 4.0 International (CC BY 4.0)
+
 
 ---
     
