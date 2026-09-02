@@ -9,6 +9,12 @@ def _parse_riesz_order(value):
     return value
 
 
+def _parse_optional_riesz_order(value):
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return _parse_riesz_order(value)
+
+
 def create_filter(filtering_method, **kwargs) -> BaseFilter:
     """Create a filter from GUI or configuration-style parameters.
 
@@ -94,6 +100,6 @@ def create_filter(filtering_method, **kwargs) -> BaseFilter:
             padding_type=params['padding_type'],
             decomposition_level=int(params['decomposition_level']),
             dimensionality=params.get('dimensionality', '3D'),
-            riesz_order=_parse_riesz_order(params.get('riesz_order')),
+            riesz_order=_parse_optional_riesz_order(params.get('riesz_order')),
         )
     raise ValueError(f"Filter {filtering_method} is not supported.")
