@@ -152,13 +152,15 @@ def _dataset_timezone(ds):
 
 def _datetime_on_reference_date(value, reference, infer_previous_day=True):
     # Vendor-private reference fields may contain either TM or a complete DT.
-    parsed = parse_time(value)
-    tzinfo = parsed.tzinfo if parsed.tzinfo is not None else reference.tzinfo
     raw_value = value.decode("utf-8").strip() if isinstance(value, bytes) else str(value).strip()
     components = re.match(r"\d+", raw_value)
-    if components is not None and len(components.group()) >= 8:
+    if components is not None and len(components.group()) == 14:
+        parsed = parse_time(value, "DT")
+        tzinfo = parsed.tzinfo if parsed.tzinfo is not None else reference.tzinfo
         return parsed.replace(tzinfo=tzinfo)
 
+    parsed = parse_time(value, "TM")
+    tzinfo = reference.tzinfo
     result = parsed.replace(
         year=reference.year,
         month=reference.month,
