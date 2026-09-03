@@ -714,7 +714,9 @@ def _functional_group_sequence(ds, frame_index, sequence_keyword):
     if per_frame is not None and frame_index < len(per_frame):
         frame_group = per_frame[frame_index]
         if hasattr(frame_group, sequence_keyword):
-            return getattr(frame_group, sequence_keyword)
+            sequence = getattr(frame_group, sequence_keyword)
+            if sequence:
+                return sequence
 
     shared = getattr(ds, "SharedFunctionalGroupsSequence", None)
     if shared:
@@ -770,17 +772,45 @@ def _rwvm_unit_descriptor(mapping, ds):
         return None
 
     compact = re.sub(r"\s+", "", unit_code).replace("\u00b2", "2").casefold()
-    if compact in {"bq/ml", "bqml"} or compact.endswith(":bq/ml"):
+    base_unit = re.sub(r"\{[^{}]*\}", "", compact)
+    if base_unit in {"bq/ml", "bqml"} or base_unit.endswith(":bq/ml"):
         return {"kind": "BQML"}
 
-    if compact.startswith("g/ml") or compact == "gml" or compact.endswith(":g/ml") or ":g/ml{" in compact:
+    if base_unit in {"g/ml", "gml"} or base_unit.endswith(":g/ml"):
         suv_type = _canonical_suv_type(unit_code) or _encoded_suv_type(mapping, ds)
         return {"kind": "SUV", "suv_type": suv_type} if suv_type is not None else None
 
-    if compact.startswith("cm2/ml") or compact == "cm2ml" or compact.endswith(":cm2/ml") or ":cm2/ml{" in compact:
+    if base_unit in {"cm2/ml", "cm2ml"} or base_unit.endswith(":cm2/ml"):
         suv_type = _canonical_suv_type(unit_code) or _encoded_suv_type(mapping, ds, default="BSA")
         return {"kind": "SUV", "suv_type": suv_type} if suv_type == "BSA" else None
     return None
+
+
+def _rwvm_mapped_range(mapping, *, require_integer=False):
+    first = getattr(
+        mapping,
+        "RealWorldValueFirstValueMapped",
+        getattr(mapping, "DoubleFloatRealWorldValueFirstValueMapped", None),
+    )
+    last = getattr(
+        mapping,
+        "RealWorldValueLastValueMapped",
+        getattr(mapping, "DoubleFloatRealWorldValueLastValueMapped", None),
+    )
+    if first in [None, ""] and last in [None, ""]:
+        return None
+    if first in [None, ""] or last in [None, ""]:
+        raise ValueError
+
+    first = float(first)
+    last = float(last)
+    if not np.isfinite(first) or not np.isfinite(last) or last < first:
+        raise ValueError
+    if require_integer:
+        if not first.is_integer() or not last.is_integer():
+            raise ValueError
+        return int(first), int(last)
+    return first, last
 
 
 def _rwvm_transform_descriptor(mapping):
@@ -796,7 +826,14 @@ def _rwvm_transform_descriptor(mapping):
             return None
         if not np.isfinite(slope) or not np.isfinite(intercept):
             return None
-        return {"method": "linear", "slope": slope, "intercept": intercept}
+        try:
+            mapped_range = _rwvm_mapped_range(mapping)
+        except (TypeError, ValueError):
+            return None
+        descriptor = {"method": "linear", "slope": slope, "intercept": intercept}
+        if mapped_range is not None:
+            descriptor["first"], descriptor["last"] = mapped_range
+        return descriptor
 
     lut_data = getattr(mapping, "RealWorldValueLUTData", None)
     if lut_data is None:
@@ -808,21 +845,13 @@ def _rwvm_transform_descriptor(mapping):
     if len(lut) == 0 or not np.all(np.isfinite(lut)):
         return None
 
-    first = getattr(
-        mapping,
-        "RealWorldValueFirstValueMapped",
-        getattr(mapping, "DoubleFloatRealWorldValueFirstValueMapped", None),
-    )
-    last = getattr(
-        mapping,
-        "RealWorldValueLastValueMapped",
-        getattr(mapping, "DoubleFloatRealWorldValueLastValueMapped", None),
-    )
     try:
-        first = int(first)
-        last = int(last)
+        mapped_range = _rwvm_mapped_range(mapping, require_integer=True)
     except (TypeError, ValueError):
         return None
+    if mapped_range is None:
+        return None
+    first, last = mapped_range
     if last < first or last - first + 1 != len(lut):
         return None
     return {"method": "lut", "lut": lut, "first": first, "last": last}
@@ -865,7 +894,40 @@ def _linear_rescale_descriptor(source, ds, unit_value):
     return {**unit, "method": "linear", "slope": slope, "intercept": intercept}
 
 
-def _enhanced_frame_mapping(ds, frame_index):
+def _mapping_value_mask(stored_values, descriptor):
+    if "first" not in descriptor:
+        return np.ones(stored_values.shape, dtype=bool)
+    return (stored_values >= descriptor["first"]) & (stored_values <= descriptor["last"])
+
+
+def _select_rwvm_candidate(candidates, stored_values):
+    ordered_candidates = sorted(candidates, key=lambda candidate: (candidate[0], candidate[1]))
+    if stored_values is None:
+        return ordered_candidates[0][2]
+
+    grouped_candidates = {}
+    for priority, _position, descriptor in ordered_candidates:
+        target = (priority, descriptor["kind"], descriptor.get("suv_type"))
+        grouped_candidates.setdefault(target, []).append(descriptor)
+
+    for descriptors in grouped_candidates.values():
+        coverage = np.zeros(stored_values.shape, dtype=bool)
+        for descriptor in descriptors:
+            coverage |= _mapping_value_mask(stored_values, descriptor)
+        if not np.all(coverage):
+            continue
+        if len(descriptors) == 1:
+            return descriptors[0]
+        return {
+            "kind": descriptors[0]["kind"],
+            "suv_type": descriptors[0].get("suv_type"),
+            "method": "composite",
+            "mappings": descriptors,
+        }
+    return None
+
+
+def _enhanced_frame_mapping(ds, frame_index, stored_values=None):
     rwvm_sequence = _functional_group_sequence(ds, frame_index, "RealWorldValueMappingSequence")
     candidates = []
     if rwvm_sequence:
@@ -881,7 +943,9 @@ def _enhanced_frame_mapping(ds, frame_index):
                 priority = 2
             candidates.append((priority, position, descriptor))
     if candidates:
-        return min(candidates, key=lambda candidate: (candidate[0], candidate[1]))[2]
+        descriptor = _select_rwvm_candidate(candidates, stored_values)
+        if descriptor is not None:
+            return descriptor
 
     pvt_sequence = _functional_group_sequence(ds, frame_index, "PixelValueTransformationSequence")
     if pvt_sequence:
@@ -909,7 +973,21 @@ def _enhanced_frame_mapping(ds, frame_index):
 
 def _apply_mapping(stored_values, descriptor):
     if descriptor["method"] == "linear":
+        if not np.all(_mapping_value_mask(stored_values, descriptor)):
+            raise DataStructureError("Stored pixel values fall outside the Real World Value Mapping range.")
         return stored_values.astype(float) * descriptor["slope"] + descriptor["intercept"]
+
+    if descriptor["method"] == "composite":
+        real_values = np.empty(stored_values.shape, dtype=float)
+        unmapped = np.ones(stored_values.shape, dtype=bool)
+        for mapping in descriptor["mappings"]:
+            selected = unmapped & _mapping_value_mask(stored_values, mapping)
+            if np.any(selected):
+                real_values[selected] = _apply_mapping(stored_values[selected], mapping)
+                unmapped[selected] = False
+        if np.any(unmapped):
+            raise DataStructureError("Stored pixel values are not covered by the Real World Value Mappings.")
+        return real_values
 
     integer_values = stored_values.astype(np.int64)
     if not np.array_equal(stored_values, integer_values):
@@ -1193,7 +1271,9 @@ def _enhanced_suv_array(ds):
     if stored_frames.ndim != 3 or stored_frames.shape[0] != frame_count:
         raise DataStructureError("Enhanced PET pixel data dimensions do not match Number of Frames (0028,0008).")
 
-    descriptors = [_enhanced_frame_mapping(ds, frame_index) for frame_index in range(frame_count)]
+    descriptors = [
+        _enhanced_frame_mapping(ds, frame_index, stored_frames[frame_index]) for frame_index in range(frame_count)
+    ]
     bqml_frame_indices = [
         frame_index for frame_index, descriptor in enumerate(descriptors) if _descriptor_uses_bqml(ds, descriptor)
     ]
