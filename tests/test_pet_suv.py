@@ -2,11 +2,9 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
-from pydicom.dataset import Dataset
 
-from zrad.exceptions import DataStructureError
 from zrad.image import Image
-from zrad.io.pet_suv import parse_time, validate_pet_dicom_tags
+from zrad.io.pet_suv import parse_time
 
 VALID_IBSI_SUV_DROS = (
     "DRO_0_0",
@@ -47,9 +45,6 @@ VALID_IBSI_SUV_DROS = (
     "DRO_4_4",
     "DRO_4_5",
     "DRO_5_0",
-)
-
-UNSUPPORTED_ENHANCED_PET_DROS = (
     "DRO_7_0_0",
     "DRO_7_1_0",
     "DRO_7_2_0",
@@ -98,15 +93,6 @@ def test_official_ibsi_suv_dro(ibsi_suv_data_dir, ibsi_suv_mask, phantom_name):
     assert actual == (0.2, 1.0, 4.0)
 
 
-@pytest.mark.integration
-@pytest.mark.parametrize("phantom_name", UNSUPPORTED_ENHANCED_PET_DROS)
-def test_official_ibsi_enhanced_pet_dro_is_rejected(ibsi_suv_data_dir, phantom_name):
-    dicom_dir = ibsi_suv_data_dir / phantom_name / "PT"
-
-    with pytest.raises(DataStructureError, match="Enhanced PET Image Storage is not supported"):
-        Image.from_dicom(dicom_dir=dicom_dir, modality="PET")
-
-
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -126,15 +112,3 @@ def test_parse_time_preserves_offsets_for_instant_comparison():
     reference = parse_time("20250330030000+0200")
 
     assert reference - injection == timedelta(minutes=30)
-
-
-@pytest.mark.parametrize("number_of_instances", [1, 2])
-def test_enhanced_pet_is_rejected(number_of_instances):
-    dicom_files = []
-    for index in range(number_of_instances):
-        ds = Dataset()
-        ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.130"
-        dicom_files.append({"ds": ds, "file_path": f"enhanced_pet_{index}.dcm"})
-
-    with pytest.raises(DataStructureError, match="Enhanced PET Image Storage is not supported"):
-        validate_pet_dicom_tags(dicom_files)

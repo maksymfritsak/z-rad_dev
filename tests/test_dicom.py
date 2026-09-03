@@ -21,31 +21,6 @@ def _make_sitk_image(size=(5, 5, 3)):
     return image
 
 
-@pytest.mark.unit
-def test_get_dicom_files_rejects_enhanced_pet_before_geometry_sorting(monkeypatch, tmp_path):
-    enhanced_pet = Dataset()
-    enhanced_pet.Modality = "PT"
-    enhanced_pet.SOPClassUID = "1.2.840.10008.5.1.4.1.1.130"
-
-    class FakeSeriesReader:
-        def GetGDCMSeriesIDs(self, directory):
-            return ["enhanced-pet"]
-
-        def GetGDCMSeriesFileNames(self, directory, series_id):
-            return [str(tmp_path / "enhanced-pet.dcm")]
-
-    monkeypatch.setattr(dicom.sitk, "ImageSeriesReader", FakeSeriesReader)
-    monkeypatch.setattr(dicom.pydicom, "dcmread", lambda *args, **kwargs: enhanced_pet)
-
-    def fail_if_sorted(_files):
-        raise AssertionError("Enhanced PET must not use classic slice geometry")
-
-    monkeypatch.setattr(dicom, "sort_by_geometric_position", fail_if_sorted)
-
-    with pytest.raises(DataStructureError, match="Enhanced PET Image Storage is not supported"):
-        dicom.get_dicom_files(str(tmp_path), "PET")
-
-
 def _contour(x, y, z, contour_type="CLOSED_PLANAR"):
     return {
         "type": contour_type,
