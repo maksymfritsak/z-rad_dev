@@ -187,7 +187,7 @@ def get_dicom_files(directory, modality):
     if modality_dicom in ["CT", "PT", "MR"] and not enhanced_series:
         dicom_files_info = remove_duplicate_slices(dicom_files_info)
         dicom_files_info = sort_by_geometric_position(dicom_files_info)
-    elif enhanced_series and len(dicom_files_info) > 1:
+    elif enhanced_series:
         dicom_files_info = _sort_enhanced_instances(dicom_files_info)
     return dicom_files_info
 
@@ -242,8 +242,17 @@ def _enhanced_frame_geometry(ds, frame_index):
 def _enhanced_frame_distances(dicom_files):
     distances = []
     reference_orientation = None
+    reference_position = None
+    reference_frame_of_reference_uid = None
     for dcm_file in dicom_files:
         ds = dcm_file["ds"]
+        frame_of_reference_uid = str(getattr(ds, "FrameOfReferenceUID", "")).strip()
+        if not frame_of_reference_uid:
+            raise DataStructureError("Enhanced PET Frame of Reference UID (0020,0052) is missing or empty.")
+        if reference_frame_of_reference_uid is None:
+            reference_frame_of_reference_uid = frame_of_reference_uid
+        elif frame_of_reference_uid != reference_frame_of_reference_uid:
+            raise DataStructureError("Enhanced PET instances use inconsistent Frame of Reference UIDs.")
         try:
             frame_count = int(ds.NumberOfFrames)
         except (AttributeError, TypeError, ValueError):
@@ -258,8 +267,16 @@ def _enhanced_frame_distances(dicom_files):
             orientation, position, normal = _enhanced_frame_geometry(ds, frame_index)
             if reference_orientation is None:
                 reference_orientation = orientation
+                reference_position = position
             elif not np.allclose(orientation, reference_orientation, rtol=0, atol=1e-6):
                 raise DataStructureError("Enhanced PET frame orientations are inconsistent.")
+            else:
+                displacement = position - reference_position
+                if (
+                    abs(np.dot(displacement, reference_orientation[:3])) > 1e-4
+                    or abs(np.dot(displacement, reference_orientation[3:])) > 1e-4
+                ):
+                    raise DataStructureError("Enhanced PET frames have inconsistent in-plane origins.")
             distances.append(float(np.dot(position, normal)))
     return distances
 
@@ -284,6 +301,10 @@ def _sort_enhanced_instances(dicom_files):
         raise DataStructureError("Enhanced PET instances cannot mix concatenation and non-concatenation objects.")
     if all(has_uid) and len(set(concatenation_uids)) != 1:
         raise DataStructureError("Enhanced PET instances have inconsistent Concatenation UIDs (0020,9161).")
+    if any(has_offset) and not all(has_uid):
+        raise DataStructureError(
+            "Enhanced PET Concatenation Frame Offset Numbers require a consistent Concatenation UID."
+        )
     if any(has_offset) and not all(has_offset):
         raise DataStructureError("Enhanced PET instances have incomplete Concatenation Frame Offset Numbers.")
 
@@ -347,17 +368,108 @@ def _sort_enhanced_instances(dicom_files):
     return [item for _distance, item in sorted(instance_distances, key=lambda entry: entry[0], reverse=reverse)]
 
 
+def _dimension_index_values(frame_content, expected_count):
+    raw_values = getattr(frame_content, "DimensionIndexValues", None)
+    if raw_values in [None, ""]:
+        raise DataStructureError("Enhanced PET frame is missing Dimension Index Values (0020,9157).")
+    try:
+        values = tuple(raw_values)
+    except TypeError:
+        values = (raw_values,)
+    if len(values) != expected_count:
+        raise DataStructureError("Enhanced PET Dimension Index Values do not match Dimension Index Sequence.")
+    try:
+        return tuple(int(value) for value in values)
+    except (TypeError, ValueError):
+        raise DataStructureError("Enhanced PET Dimension Index Values are invalid.")
+
+
+def _validate_enhanced_spatial_dimensions(dicom_files):
+    spatial_pointers = {0x00200032, 0x00209057}  # Image Position (Patient), In-Stack Position Number
+    reference_pointers = None
+    reference_non_spatial_values = None
+    reference_stack_id = None
+    reference_temporal_position = None
+
+    for dcm_file in dicom_files:
+        ds = dcm_file["ds"]
+        organization_type = str(getattr(ds, "DimensionOrganizationType", "")).strip().upper()
+        if organization_type not in {"", "3D"}:
+            raise DataStructureError(
+                f"Enhanced PET Dimension Organization Type '{organization_type}' cannot be represented as one 3D volume."
+            )
+
+        dimension_sequence = getattr(ds, "DimensionIndexSequence", None)
+        if not dimension_sequence:
+            raise DataStructureError("Enhanced PET Dimension Index Sequence (0020,9222) is missing or empty.")
+        try:
+            pointers = tuple(int(item.DimensionIndexPointer) for item in dimension_sequence)
+        except (AttributeError, TypeError, ValueError):
+            raise DataStructureError("Enhanced PET Dimension Index Sequence contains an invalid pointer.")
+        if reference_pointers is None:
+            reference_pointers = pointers
+        elif pointers != reference_pointers:
+            raise DataStructureError("Enhanced PET instances use inconsistent Dimension Index Sequences.")
+
+        non_spatial_indices = tuple(index for index, pointer in enumerate(pointers) if pointer not in spatial_pointers)
+        for frame_index in range(_enhanced_instance_frame_count(dcm_file)):
+            frame_content_sequence = _enhanced_functional_group_sequence(ds, frame_index, "FrameContentSequence")
+            if not frame_content_sequence or len(frame_content_sequence) != 1:
+                raise DataStructureError("Enhanced PET frame must contain one Frame Content Sequence item.")
+            frame_content = frame_content_sequence[0]
+            index_values = _dimension_index_values(frame_content, len(pointers))
+            non_spatial_values = tuple(index_values[index] for index in non_spatial_indices)
+            if reference_non_spatial_values is None:
+                reference_non_spatial_values = non_spatial_values
+            elif non_spatial_values != reference_non_spatial_values:
+                raise DataStructureError("Enhanced PET contains multiple non-spatial frame dimensions.")
+
+            stack_id = getattr(frame_content, "StackID", None)
+            if stack_id not in [None, ""]:
+                stack_id = str(stack_id)
+                if reference_stack_id is None:
+                    reference_stack_id = stack_id
+                elif stack_id != reference_stack_id:
+                    raise DataStructureError("Enhanced PET contains multiple frame stacks.")
+
+            temporal_position = getattr(frame_content, "TemporalPositionIndex", None)
+            if temporal_position not in [None, ""]:
+                try:
+                    temporal_position = int(temporal_position)
+                except (TypeError, ValueError):
+                    raise DataStructureError("Enhanced PET Temporal Position Index (0020,9128) is invalid.")
+                if reference_temporal_position is None:
+                    reference_temporal_position = temporal_position
+                elif temporal_position != reference_temporal_position:
+                    raise DataStructureError("Enhanced PET contains multiple temporal positions.")
+
+
 def _enhanced_image_geometry(dicom_files):
+    _validate_enhanced_spatial_dimensions(dicom_files)
     first_ds = dicom_files[0]["ds"]
     orientation, position, normal = _enhanced_frame_geometry(first_ds, 0)
-    pixel_measures_sequence = _enhanced_functional_group_sequence(first_ds, 0, "PixelMeasuresSequence")
-    pixel_measures = pixel_measures_sequence[0] if pixel_measures_sequence else first_ds
-    try:
-        pixel_spacing = np.asarray(pixel_measures.PixelSpacing, dtype=float)
-    except (AttributeError, TypeError, ValueError):
-        raise DataStructureError("Enhanced PET Pixel Spacing (0028,0030) is missing or invalid.")
-    if pixel_spacing.shape != (2,) or not np.all(np.isfinite(pixel_spacing)) or np.any(pixel_spacing <= 0):
-        raise DataStructureError("Enhanced PET Pixel Spacing (0028,0030) must contain two positive values.")
+    pixel_spacing = None
+    pixel_measures = None
+    for dcm_file in dicom_files:
+        ds = dcm_file["ds"]
+        for frame_index in range(_enhanced_instance_frame_count(dcm_file)):
+            pixel_measures_sequence = _enhanced_functional_group_sequence(ds, frame_index, "PixelMeasuresSequence")
+            frame_pixel_measures = pixel_measures_sequence[0] if pixel_measures_sequence else ds
+            try:
+                frame_pixel_spacing = np.asarray(frame_pixel_measures.PixelSpacing, dtype=float)
+            except (AttributeError, TypeError, ValueError):
+                raise DataStructureError("Enhanced PET Pixel Spacing (0028,0030) is missing or invalid.")
+            if (
+                frame_pixel_spacing.shape != (2,)
+                or not np.all(np.isfinite(frame_pixel_spacing))
+                or np.any(frame_pixel_spacing <= 0)
+            ):
+                raise DataStructureError("Enhanced PET Pixel Spacing (0028,0030) must contain two positive values.")
+            if pixel_spacing is None:
+                pixel_spacing = frame_pixel_spacing
+                pixel_measures = frame_pixel_measures
+            elif not np.allclose(frame_pixel_spacing, pixel_spacing, rtol=0, atol=1e-6):
+                raise DataStructureError("Enhanced PET frames have inconsistent in-plane pixel spacing.")
 
     distances = _enhanced_frame_distances(dicom_files)
     if len(distances) > 1:
@@ -435,6 +547,7 @@ def modality_mapping(modality):
 
 def process_dicom_series(dicom_files, modality):
     if modality == "PET" and dicom_files and all(is_enhanced_pet(item["ds"]) for item in dicom_files):
+        origin, spacing, direction = _enhanced_image_geometry(dicom_files)
         enhanced_images = [sitk.ReadImage(item["file_path"]) for item in dicom_files]
         reference = enhanced_images[0]
         arrays = []
@@ -443,7 +556,6 @@ def process_dicom_series(dicom_files, modality):
                 raise DataStructureError("Enhanced PET instances have incompatible in-plane dimensions.")
             arrays.append(sitk.GetArrayFromImage(image))
         image = sitk.GetImageFromArray(np.concatenate(arrays, axis=0))
-        origin, spacing, direction = _enhanced_image_geometry(dicom_files)
         image.SetOrigin(origin)
         image.SetSpacing(spacing)
         image.SetDirection(direction)

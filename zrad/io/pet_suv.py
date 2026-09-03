@@ -816,7 +816,10 @@ def _rwvm_mapped_range(mapping, *, require_integer=False):
 def _rwvm_transform_descriptor(mapping):
     slope = getattr(mapping, "RealWorldValueSlope", None)
     intercept = getattr(mapping, "RealWorldValueIntercept", None)
+    lut_data = getattr(mapping, "RealWorldValueLUTData", None)
     if slope not in [None, ""] or intercept not in [None, ""]:
+        if lut_data is not None:
+            return None
         if slope in [None, ""] or intercept in [None, ""]:
             return None
         try:
@@ -835,7 +838,6 @@ def _rwvm_transform_descriptor(mapping):
             descriptor["first"], descriptor["last"] = mapped_range
         return descriptor
 
-    lut_data = getattr(mapping, "RealWorldValueLUTData", None)
     if lut_data is None:
         return None
     try:
@@ -911,13 +913,31 @@ def _select_rwvm_candidate(candidates, stored_values):
         grouped_candidates.setdefault(target, []).append(descriptor)
 
     for descriptors in grouped_candidates.values():
+        complete_descriptor = None
         coverage = np.zeros(stored_values.shape, dtype=bool)
+        mapped_values = np.empty(stored_values.shape, dtype=float)
+        mappings_agree = True
         for descriptor in descriptors:
-            coverage |= _mapping_value_mask(stored_values, descriptor)
-        if not np.all(coverage):
+            descriptor_mask = _mapping_value_mask(stored_values, descriptor)
+            if complete_descriptor is None and np.all(descriptor_mask):
+                complete_descriptor = descriptor
+            overlap = coverage & descriptor_mask
+            if np.any(overlap) and not np.allclose(
+                mapped_values[overlap],
+                _apply_mapping(stored_values[overlap], descriptor),
+                rtol=1e-12,
+                atol=1e-12,
+            ):
+                mappings_agree = False
+                break
+            newly_mapped = descriptor_mask & ~coverage
+            if np.any(newly_mapped):
+                mapped_values[newly_mapped] = _apply_mapping(stored_values[newly_mapped], descriptor)
+            coverage |= descriptor_mask
+        if not mappings_agree or not np.all(coverage):
             continue
-        if len(descriptors) == 1:
-            return descriptors[0]
+        if complete_descriptor is not None:
+            return complete_descriptor
         return {
             "kind": descriptors[0]["kind"],
             "suv_type": descriptors[0].get("suv_type"),
@@ -1111,8 +1131,10 @@ def _enhanced_administration_datetime(ds, reference_datetime, half_life):
         "Radiopharmaceutical Start DateTime (0018,1078)",
     )
     reference_datetime, administration = _make_datetimes_comparable(ds, reference_datetime, administration)
+    decay_corrected = str(getattr(ds, "DecayCorrected", "")).strip().upper()
+    minimum_offset_seconds = 0 if decay_corrected == "NO" else -3600
     offset_seconds = (reference_datetime - administration).total_seconds()
-    if -3600 <= offset_seconds < 2 * half_life:
+    if minimum_offset_seconds <= offset_seconds < 2 * half_life:
         return administration
 
     if half_life >= 41400:
@@ -1129,7 +1151,13 @@ def _enhanced_administration_datetime(ds, reference_datetime, half_life):
     if (reference_datetime - administration).total_seconds() < -3600:
         administration -= timedelta(days=1)
 
-    return administration
+    reconstructed_offset_seconds = (reference_datetime - administration).total_seconds()
+    if minimum_offset_seconds <= reconstructed_offset_seconds < 2 * half_life:
+        return administration
+    raise DataStructureError(
+        "Radiopharmaceutical Start DateTime remains inconsistent with the decay-correction reference datetime "
+        "after date reconstruction."
+    )
 
 
 def _radiopharmaceutical_name(rph):
@@ -1246,21 +1274,11 @@ def _enhanced_descriptor_to_suvbw_factor(ds, frame_index, descriptor, bqml_conte
 
 def _validate_enhanced_pet(ds):
     frame_count = _enhanced_frame_count(ds)
-    descriptors = [_enhanced_frame_mapping(ds, frame_index) for frame_index in range(frame_count)]
-    bqml_frame_indices = [
-        frame_index for frame_index, descriptor in enumerate(descriptors) if _descriptor_uses_bqml(ds, descriptor)
-    ]
-    bqml_context = (
-        _enhanced_bqml_context(
-            ds,
-            require_half_life=_bqml_frames_require_half_life(ds, bqml_frame_indices),
-        )
-        if bqml_frame_indices
-        else None
-    )
-
-    for frame_index, descriptor in enumerate(descriptors):
-        _enhanced_descriptor_to_suvbw_factor(ds, frame_index, descriptor, bqml_context)
+    # Pixel ranges determine which of several RWVM items is applicable. The
+    # metadata-only dataset used here cannot safely validate normalization or
+    # dose requirements for one candidate before the stored values are read.
+    for frame_index in range(frame_count):
+        _enhanced_frame_mapping(ds, frame_index)
 
 
 def _enhanced_suv_array(ds):
