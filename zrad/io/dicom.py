@@ -281,6 +281,28 @@ def _enhanced_frame_distances(dicom_files):
     return distances
 
 
+def _validated_enhanced_slice_spacing(distances):
+    differences = np.diff(np.asarray(distances, dtype=float))
+    if len(differences) == 0:
+        return None, None
+    if np.any(np.abs(differences) <= 1e-6):
+        raise DataStructureError("Enhanced PET contains multiple frames at the same spatial position.")
+    if len(differences) > 1 and not (np.all(differences > 0) or np.all(differences < 0)):
+        raise DataStructureError("Enhanced PET frames are not ordered as a single spatial stack.")
+
+    slice_spacings = np.abs(differences)
+    reference_spacing = slice_spacings[0]
+    spacing_deviations = np.abs(slice_spacings - reference_spacing)
+    spacing_threshold = 0.1
+    if np.any(spacing_deviations > spacing_threshold):
+        maximum_deviation = float(np.max(spacing_deviations))
+        raise DataStructureError(
+            f"Inconsistent z-spacing. Absolute deviation is {maximum_deviation:.3f} which is greater than "
+            f"{spacing_threshold:.3f} mm."
+        )
+    return float(np.median(slice_spacings)), 1 if differences[0] > 0 else -1
+
+
 def _enhanced_instance_frame_count(dcm_file):
     try:
         frame_count = int(dcm_file["ds"].NumberOfFrames)
@@ -473,9 +495,8 @@ def _enhanced_image_geometry(dicom_files):
 
     distances = _enhanced_frame_distances(dicom_files)
     if len(distances) > 1:
-        differences = np.diff(np.asarray(distances))
-        z_spacing = float(np.median(np.abs(differences)))
-        normal *= 1 if differences[0] > 0 else -1
+        z_spacing, direction_sign = _validated_enhanced_slice_spacing(distances)
+        normal *= direction_sign
     else:
         spacing_between_slices = getattr(pixel_measures, "SpacingBetweenSlices", None)
         slice_thickness = getattr(pixel_measures, "SliceThickness", None)
@@ -494,12 +515,8 @@ def _enhanced_image_geometry(dicom_files):
 def validate_z_spacing(dicom_files):
     if dicom_files and all(is_enhanced_pet(dcm_file["ds"]) for dcm_file in dicom_files):
         slice_z_origin = _enhanced_frame_distances(dicom_files)
-        differences = np.diff(np.asarray(slice_z_origin, dtype=float))
-        if np.any(np.abs(differences) <= 1e-6):
-            raise DataStructureError("Enhanced PET contains multiple frames at the same spatial position.")
-        if len(differences) > 1 and not (np.all(differences > 0) or np.all(differences < 0)):
-            raise DataStructureError("Enhanced PET frames are not ordered as a single spatial stack.")
-        slice_thickness = np.abs(differences).tolist()
+        _validated_enhanced_slice_spacing(slice_z_origin)
+        return
     else:
         slice_z_origin = []
         for dcm_file in dicom_files:
