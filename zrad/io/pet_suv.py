@@ -954,6 +954,11 @@ def _enhanced_frame_mapping(ds, frame_index, stored_values=None):
         for position, mapping in enumerate(rwvm_sequence):
             descriptor = _rwvm_descriptor(mapping, ds)
             if descriptor is None:
+                if _rwvm_unit_descriptor(mapping, ds) is not None:
+                    raise DataStructureError(
+                        f"Enhanced PET frame {frame_index + 1} Real World Value Mapping item {position + 1} "
+                        "has recognized quantitative units but an invalid or incomplete transformation."
+                    )
                 continue
             if descriptor["kind"] == "SUV" and descriptor["suv_type"] == "BW":
                 priority = 0
@@ -966,6 +971,10 @@ def _enhanced_frame_mapping(ds, frame_index, stored_values=None):
         descriptor = _select_rwvm_candidate(candidates, stored_values)
         if descriptor is not None:
             return descriptor
+        raise DataStructureError(
+            f"Enhanced PET frame {frame_index + 1} has recognized Real World Value Mappings, but they do not "
+            "completely and consistently cover its stored pixel values."
+        )
 
     pvt_sequence = _functional_group_sequence(ds, frame_index, "PixelValueTransformationSequence")
     if pvt_sequence:
@@ -1178,16 +1187,55 @@ def _enhanced_bqml_context(ds, require_half_life=True, warn_on_unit_conversion=F
         getattr(rph, "RadionuclideTotalDose", None),
         "Radionuclide Total Dose (0018,1074)",
     )
-    tracer_name = _radiopharmaceutical_name(rph)
-    if tracer_name is not None and is_fdg(tracer_name) and injected_dose < 10000:
-        injected_dose *= 1000000
-        if warn_on_unit_conversion:
+    if not _is_legacy_converted_enhanced_pet(ds):
+        if injected_dose < 10000:
+            injected_dose *= 1000000
+        elif warn_on_unit_conversion:
             warnings.warn(
-                f"Injected dose is {injected_dose} Bq, it is too low for FDG, assumed to be in MBq",
+                "Enhanced PET Radionuclide Total Dose is encoded as a Bq-scale value despite the DICOM MBq "
+                "definition; treating it as Bq.",
                 DataStructureWarning,
             )
+    else:
+        tracer_name = _radiopharmaceutical_name(rph)
+        if tracer_name is not None and is_fdg(tracer_name) and injected_dose < 10000:
+            injected_dose *= 1000000
+            if warn_on_unit_conversion:
+                warnings.warn(
+                    f"Injected dose is {injected_dose} Bq, it is too low for FDG, assumed to be in MBq",
+                    DataStructureWarning,
+                )
     half_life = get_radionuclide_half_life(ds) if require_half_life else None
     return get_patient_weight_kg(ds), injected_dose, half_life
+
+
+def _enhanced_administration_context(ds, frame_indices, half_life):
+    if half_life is None:
+        return None
+
+    decay_constant = np.log(2) / half_life
+    administration_datetimes = []
+    for frame_index in frame_indices:
+        if _uses_legacy_converted_decay_timing(ds, frame_index):
+            if str(getattr(ds, "DecayCorrection", "")).strip().upper() == "ADMIN":
+                continue
+            administration_datetime, _acquisition_datetime = resolve_injection_and_acquisition_times(
+                ds,
+                half_life,
+                decay_constant,
+            )
+        else:
+            reference_datetime = _enhanced_decay_reference_datetime(ds, frame_index, decay_constant)
+            administration_datetime = _enhanced_administration_datetime(ds, reference_datetime, half_life)
+        administration_datetimes.append(administration_datetime)
+
+    if not administration_datetimes:
+        return None
+    if any(value != administration_datetimes[0] for value in administration_datetimes[1:]):
+        raise DataStructureError(
+            "Enhanced PET frames resolve to inconsistent radiopharmaceutical administration datetimes."
+        )
+    return administration_datetimes[0]
 
 
 def _legacy_converted_bqml_to_suvbw_factor(ds, context):
@@ -1281,7 +1329,7 @@ def _validate_enhanced_pet(ds):
         _enhanced_frame_mapping(ds, frame_index)
 
 
-def _enhanced_suv_array(ds):
+def _enhanced_suv_array(ds, return_normalization_context=False):
     frame_count = _enhanced_frame_count(ds)
     stored_frames = np.asarray(ds.pixel_array)
     if stored_frames.ndim == 2:
@@ -1304,12 +1352,63 @@ def _enhanced_suv_array(ds):
         if bqml_frame_indices
         else None
     )
+    normalization_context = {}
+    if bqml_context is not None:
+        patient_weight, injected_dose, half_life = bqml_context
+        normalization_context.update(
+            {
+                "Patient Weight (0010,1030)": patient_weight,
+                "Radionuclide Total Dose (0018,1074)": injected_dose,
+            }
+        )
+        if half_life is None:
+            rph = _single_radiopharmaceutical_item(ds)
+            raw_half_life = getattr(rph, "RadionuclideHalfLife", None)
+            if raw_half_life not in [None, ""]:
+                half_life = _finite_positive(raw_half_life, "Radionuclide Half Life (0018,1075)")
+        if half_life is not None:
+            normalization_context["Radionuclide Half Life (0018,1075)"] = half_life
+
+        administration_datetime = _enhanced_administration_context(ds, bqml_frame_indices, half_life)
+        if administration_datetime is not None:
+            normalization_context["Radiopharmaceutical Start DateTime (0018,1078)"] = administration_datetime
+
+    non_bw_suv_types = {
+        descriptor["suv_type"]
+        for descriptor in descriptors
+        if descriptor["kind"] == "SUV" and descriptor["suv_type"] != "BW"
+    }
+    if non_bw_suv_types:
+        normalization_context["Patient Weight (0010,1030)"] = get_patient_weight_kg(ds)
+        normalization_context["Patient Size (0010,1020)"] = get_patient_height_cm(ds)
+        if non_bw_suv_types != {"BSA"}:
+            normalization_context["Patient Sex (0010,0040)"] = get_patient_sex(ds)
+
     suv_frames = np.empty(stored_frames.shape, dtype=float)
     for frame_index, (stored_frame, descriptor) in enumerate(zip(stored_frames, descriptors)):
         physical_values = _apply_mapping(stored_frame, descriptor)
         factor = _enhanced_descriptor_to_suvbw_factor(ds, frame_index, descriptor, bqml_context)
         suv_frames[frame_index] = physical_values * factor
+    if return_normalization_context:
+        return suv_frames, normalization_context
     return suv_frames
+
+
+def _validate_enhanced_normalization_contexts(contexts):
+    reference_values = {}
+    for instance_index, context in enumerate(contexts):
+        for name, value in context.items():
+            reference_value = reference_values.get(name)
+            if isinstance(value, (int, float, np.number)) and isinstance(reference_value, (int, float, np.number)):
+                values_agree = np.isclose(value, reference_value, rtol=1e-12, atol=0.0)
+            else:
+                values_agree = value == reference_value
+            if name in reference_values and not values_agree:
+                raise DataStructureError(
+                    f"Enhanced PET instances have inconsistent {name} values; instance {instance_index + 1} "
+                    "would use a different SUV normalization factor."
+                )
+            reference_values.setdefault(name, value)
 
 
 def validate_pet_dicom_tags(dicom_files):
@@ -1423,10 +1522,15 @@ def apply_suv_correction(dicom_files, suv_image):
         if not all(enhanced_flags):
             raise DataStructureError("A PET series cannot mix Enhanced and conventional PET instances.")
         try:
-            intensity_array = np.concatenate(
-                [_enhanced_suv_array(pydicom.dcmread(dcm_file["file_path"])) for dcm_file in dicom_files],
-                axis=0,
-            )
+            instance_results = [
+                _enhanced_suv_array(
+                    pydicom.dcmread(dcm_file["file_path"]),
+                    return_normalization_context=True,
+                )
+                for dcm_file in dicom_files
+            ]
+            _validate_enhanced_normalization_contexts([context for _array, context in instance_results])
+            intensity_array = np.concatenate([array for array, _context in instance_results], axis=0)
         except ValueError as exc:
             raise DataStructureError("Enhanced PET instances have incompatible pixel dimensions.") from exc
 
