@@ -907,9 +907,10 @@ def _rwvm_transform_descriptor(mapping):
             mapped_range = _rwvm_mapped_range(mapping)
         except (TypeError, ValueError):
             return None
+        if mapped_range is None:
+            return None
         descriptor = {"method": "linear", "slope": slope, "intercept": intercept}
-        if mapped_range is not None:
-            descriptor["first"], descriptor["last"] = mapped_range
+        descriptor["first"], descriptor["last"] = mapped_range
         return descriptor
 
     if lut_data is None:
@@ -1526,10 +1527,6 @@ def _enhanced_suv_array(ds, return_normalization_context=False):
                 "Radionuclide Total Dose (0018,1074)",
             )
             _store_normalization_context_value(normalization_context, dose_name, injected_dose)
-            if half_life is None:
-                raw_half_life = getattr(rph, "RadionuclideHalfLife", None)
-                if raw_half_life not in [None, ""]:
-                    half_life = _finite_positive(raw_half_life, "Radionuclide Half Life (0018,1075)")
             if half_life is not None:
                 half_life_name = _enhanced_radiopharmaceutical_context_key(
                     ds,
