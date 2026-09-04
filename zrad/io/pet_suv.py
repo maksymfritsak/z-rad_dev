@@ -727,6 +727,59 @@ def _functional_group_sequence(ds, frame_index, sequence_keyword):
     return getattr(ds, sequence_keyword, None)
 
 
+def _enhanced_radiopharmaceutical_items(ds, frame_index):
+    if _is_legacy_converted_enhanced_pet(ds):
+        return [_single_radiopharmaceutical_item(ds)]
+
+    sequence = getattr(ds, "RadiopharmaceuticalInformationSequence", None)
+    if sequence is None or len(sequence) == 0:
+        raise DataStructureError("Radiopharmaceutical Information Sequence (0054,0016) is missing or empty.")
+
+    usage_sequence = _functional_group_sequence(ds, frame_index, "RadiopharmaceuticalUsageSequence")
+    if not usage_sequence:
+        if len(sequence) == 1:
+            return [sequence[0]]
+        raise DataStructureError(
+            f"Enhanced PET frame {frame_index + 1} does not identify its radiopharmaceutical agent."
+        )
+
+    referenced_agent_numbers = set()
+    for usage in usage_sequence:
+        try:
+            agent_number = int(usage.RadiopharmaceuticalAgentNumber)
+        except (AttributeError, TypeError, ValueError):
+            raise DataStructureError(
+                f"Enhanced PET frame {frame_index + 1} has a missing or invalid Radiopharmaceutical Agent Number "
+                "(0018,9729)."
+            )
+        if agent_number <= 0:
+            raise DataStructureError("Radiopharmaceutical Agent Number (0018,9729) must be positive.")
+        referenced_agent_numbers.add(agent_number)
+
+    items_by_agent_number = {}
+    for rph in sequence:
+        try:
+            agent_number = int(rph.RadiopharmaceuticalAgentNumber)
+        except (AttributeError, TypeError, ValueError):
+            raise DataStructureError(
+                "Enhanced PET Radiopharmaceutical Information Sequence contains a missing or invalid "
+                "Radiopharmaceutical Agent Number (0018,9729)."
+            )
+        if agent_number in items_by_agent_number:
+            raise DataStructureError(
+                f"Enhanced PET has duplicate radiopharmaceutical agent number {agent_number}."
+            )
+        items_by_agent_number[agent_number] = rph
+
+    missing_agent_numbers = referenced_agent_numbers - items_by_agent_number.keys()
+    if missing_agent_numbers:
+        raise DataStructureError(
+            f"Enhanced PET frame {frame_index + 1} references radiopharmaceutical agent "
+            f"number(s) {sorted(missing_agent_numbers)}, but matching isotope items were not found."
+        )
+    return [items_by_agent_number[number] for number in sorted(referenced_agent_numbers)]
+
+
 def _coded_value(code_item):
     """Read a code from any of the three DICOM code-value attributes."""
     for tag in ((0x0008, 0x0100), (0x0008, 0x0119), (0x0008, 0x0120)):
@@ -736,23 +789,47 @@ def _coded_value(code_item):
     return None
 
 
+def _rwvm_unit_code_parts(mapping):
+    units_sequence = getattr(mapping, "MeasurementUnitsCodeSequence", None)
+    if not units_sequence:
+        return None, None
+    unit_code = _coded_value(units_sequence[0])
+    if unit_code is None:
+        return None, None
+    compact = re.sub(r"\s+", "", unit_code).replace("\u00b2", "2").casefold()
+    return unit_code, re.sub(r"\{[^{}]*\}", "", compact)
+
+
+def _rwvm_has_recognized_pet_unit(mapping):
+    _unit_code, base_unit = _rwvm_unit_code_parts(mapping)
+    return base_unit in {"bq/ml", "bqml", "g/ml", "gml", "cm2/ml", "cm2ml"} or (
+        base_unit is not None and base_unit.endswith((":bq/ml", ":g/ml", ":cm2/ml"))
+    )
+
+
 def _canonical_suv_type(value):
     if value in [None, ""]:
         return None
-    compact = re.sub(r"[^A-Z0-9]", "", str(value).upper())
-    if "LBMJAMES128" in compact:
-        return "LBMJAMES128"
-    if "LBMJANMA" in compact:
-        return "LBMJANMA"
-    if "SUVLBM" in compact or compact == "LBM":
-        return "LBM"
-    if "SUVIBW" in compact or compact == "IBW":
-        return "IBW"
-    if "SUVBSA" in compact or compact == "BSA":
-        return "BSA"
-    if "SUVBW" in compact or compact == "BW":
-        return "BW"
-    return None
+    normalized = str(value).strip().upper()
+    return normalized if normalized in {"BW", "BSA", "LBM", "LBMJAMES128", "LBMJANMA", "IBW"} else None
+
+
+def _suv_type_from_unit_code(unit_code):
+    annotations = re.findall(r"\{([^{}]+)\}", str(unit_code))
+    if not annotations:
+        return False, None
+    if len(annotations) != 1:
+        return True, None
+    normalized = re.sub(r"[^A-Z0-9]", "", annotations[0].upper())
+    return True, {
+        "SUVBW": "BW",
+        "SUVBSA": "BSA",
+        "SUVLBM": "LBM",
+        "SUVLBMJAMES": "LBM",
+        "SUVLBMJAMES128": "LBMJAMES128",
+        "SUVLBMJANMA": "LBMJANMA",
+        "SUVIBW": "IBW",
+    }.get(normalized)
 
 
 def _encoded_suv_type(source, ds, default=None):
@@ -764,24 +841,23 @@ def _encoded_suv_type(source, ds, default=None):
 
 
 def _rwvm_unit_descriptor(mapping, ds):
-    units_sequence = getattr(mapping, "MeasurementUnitsCodeSequence", None)
-    if not units_sequence:
-        return None
-    unit_code = _coded_value(units_sequence[0])
+    unit_code, base_unit = _rwvm_unit_code_parts(mapping)
     if unit_code is None:
         return None
 
-    compact = re.sub(r"\s+", "", unit_code).replace("\u00b2", "2").casefold()
-    base_unit = re.sub(r"\{[^{}]*\}", "", compact)
     if base_unit in {"bq/ml", "bqml"} or base_unit.endswith(":bq/ml"):
         return {"kind": "BQML"}
 
     if base_unit in {"g/ml", "gml"} or base_unit.endswith(":g/ml"):
-        suv_type = _canonical_suv_type(unit_code) or _encoded_suv_type(mapping, ds)
+        has_annotation, suv_type = _suv_type_from_unit_code(unit_code)
+        if not has_annotation:
+            suv_type = _encoded_suv_type(mapping, ds)
         return {"kind": "SUV", "suv_type": suv_type} if suv_type is not None else None
 
     if base_unit in {"cm2/ml", "cm2ml"} or base_unit.endswith(":cm2/ml"):
-        suv_type = _canonical_suv_type(unit_code) or _encoded_suv_type(mapping, ds, default="BSA")
+        has_annotation, suv_type = _suv_type_from_unit_code(unit_code)
+        if not has_annotation:
+            suv_type = _encoded_suv_type(mapping, ds, default="BSA")
         return {"kind": "SUV", "suv_type": suv_type} if suv_type == "BSA" else None
     return None
 
@@ -934,8 +1010,10 @@ def _select_rwvm_candidate(candidates, stored_values):
             if np.any(newly_mapped):
                 mapped_values[newly_mapped] = _apply_mapping(stored_values[newly_mapped], descriptor)
             coverage |= descriptor_mask
-        if not mappings_agree or not np.all(coverage):
+        if not np.any(coverage):
             continue
+        if not mappings_agree or not np.all(coverage):
+            return None
         if complete_descriptor is not None:
             return complete_descriptor
         return {
@@ -954,7 +1032,7 @@ def _enhanced_frame_mapping(ds, frame_index, stored_values=None):
         for position, mapping in enumerate(rwvm_sequence):
             descriptor = _rwvm_descriptor(mapping, ds)
             if descriptor is None:
-                if _rwvm_unit_descriptor(mapping, ds) is not None:
+                if _rwvm_has_recognized_pet_unit(mapping):
                     raise DataStructureError(
                         f"Enhanced PET frame {frame_index + 1} Real World Value Mapping item {position + 1} "
                         "has recognized quantitative units but an invalid or incomplete transformation."
@@ -1133,8 +1211,9 @@ def _uses_legacy_converted_decay_timing(ds, frame_index):
     return _is_legacy_converted_enhanced_pet(ds) and not _has_enhanced_decay_timing(ds, frame_index)
 
 
-def _enhanced_administration_datetime(ds, reference_datetime, half_life):
-    rph = _single_radiopharmaceutical_item(ds)
+def _enhanced_administration_datetime(ds, reference_datetime, half_life, rph=None):
+    if rph is None:
+        rph = _single_radiopharmaceutical_item(ds)
     administration = _parse_complete_datetime(
         getattr(rph, "RadiopharmaceuticalStartDateTime", None),
         "Radiopharmaceutical Start DateTime (0018,1078)",
@@ -1181,65 +1260,137 @@ def _radiopharmaceutical_name(rph):
     return None
 
 
-def _enhanced_bqml_context(ds, require_half_life=True, warn_on_unit_conversion=False):
-    rph = _single_radiopharmaceutical_item(ds)
-    injected_dose = _finite_positive(
-        getattr(rph, "RadionuclideTotalDose", None),
-        "Radionuclide Total Dose (0018,1074)",
+def _is_ibsi_suv_dro(ds):
+    manufacturer = str(getattr(ds, "Manufacturer", "")).strip().upper()
+    institution = str(getattr(ds, "InstitutionName", "")).strip().upper()
+    study_description = str(getattr(ds, "StudyDescription", "")).strip().upper()
+    return (
+        manufacturer == "SYNTHETIC"
+        and "IMAGE BIOMARKER STANDARDISATION INITIATIVE" in institution
+        and study_description.startswith("PET SUV VERIFICATION DRO_")
     )
-    if not _is_legacy_converted_enhanced_pet(ds):
-        if injected_dose < 10000:
-            injected_dose *= 1000000
-        elif warn_on_unit_conversion:
-            warnings.warn(
-                "Enhanced PET Radionuclide Total Dose is encoded as a Bq-scale value despite the DICOM MBq "
-                "definition; treating it as Bq.",
-                DataStructureWarning,
+
+
+def _enhanced_bqml_context(ds, frame_index, require_half_life=True, warn_on_unit_conversion=False):
+    radiopharmaceuticals = _enhanced_radiopharmaceutical_items(ds, frame_index)
+    if len(radiopharmaceuticals) != 1:
+        raise DataStructureError(
+            f"Enhanced PET frame {frame_index + 1} references multiple radiopharmaceutical agents, so its Bq/ml "
+            "values cannot be converted to a uniquely defined SUV. An encoded SUV Real World Value Mapping is "
+            "required for this frame."
+        )
+
+    administrations = []
+    for rph in radiopharmaceuticals:
+        injected_dose = _finite_positive(
+            getattr(rph, "RadionuclideTotalDose", None),
+            "Radionuclide Total Dose (0018,1074)",
+        )
+        if not _is_legacy_converted_enhanced_pet(ds):
+            if _is_ibsi_suv_dro(ds):
+                if warn_on_unit_conversion:
+                    warnings.warn(
+                        "The IBSI Enhanced PET DRO encodes Radionuclide Total Dose in Bq despite the DICOM MBq "
+                        "definition; treating it as Bq.",
+                        DataStructureWarning,
+                    )
+            else:
+                injected_dose *= 1000000
+        else:
+            tracer_name = _radiopharmaceutical_name(rph)
+            if tracer_name is not None and is_fdg(tracer_name) and injected_dose < 10000:
+                injected_dose *= 1000000
+                if warn_on_unit_conversion:
+                    warnings.warn(
+                        f"Injected dose is {injected_dose} Bq, it is too low for FDG, assumed to be in MBq",
+                        DataStructureWarning,
+                    )
+        half_life = (
+            _finite_positive(
+                getattr(rph, "RadionuclideHalfLife", None),
+                "Radionuclide Half Life (0018,1075)",
             )
-    else:
-        tracer_name = _radiopharmaceutical_name(rph)
-        if tracer_name is not None and is_fdg(tracer_name) and injected_dose < 10000:
-            injected_dose *= 1000000
-            if warn_on_unit_conversion:
-                warnings.warn(
-                    f"Injected dose is {injected_dose} Bq, it is too low for FDG, assumed to be in MBq",
-                    DataStructureWarning,
-                )
-    half_life = get_radionuclide_half_life(ds) if require_half_life else None
-    return get_patient_weight_kg(ds), injected_dose, half_life
+            if require_half_life
+            else None
+        )
+        administrations.append({"rph": rph, "injected_dose": injected_dose, "half_life": half_life})
+    return {"patient_weight": get_patient_weight_kg(ds), "administrations": administrations}
 
 
-def _enhanced_administration_context(ds, frame_indices, half_life):
+def _enhanced_frame_administration_context(ds, frame_index, half_life, rph):
     if half_life is None:
         return None
+    if _uses_legacy_converted_decay_timing(ds, frame_index):
+        if str(getattr(ds, "DecayCorrection", "")).strip().upper() == "ADMIN":
+            return None
+        decay_constant = np.log(2) / half_life
+        administration_datetime, _acquisition_datetime = resolve_injection_and_acquisition_times(
+            ds,
+            half_life,
+            decay_constant,
+        )
+        return administration_datetime
 
     decay_constant = np.log(2) / half_life
-    administration_datetimes = []
-    for frame_index in frame_indices:
-        if _uses_legacy_converted_decay_timing(ds, frame_index):
-            if str(getattr(ds, "DecayCorrection", "")).strip().upper() == "ADMIN":
-                continue
-            administration_datetime, _acquisition_datetime = resolve_injection_and_acquisition_times(
-                ds,
-                half_life,
-                decay_constant,
-            )
-        else:
-            reference_datetime = _enhanced_decay_reference_datetime(ds, frame_index, decay_constant)
-            administration_datetime = _enhanced_administration_datetime(ds, reference_datetime, half_life)
-        administration_datetimes.append(administration_datetime)
+    reference_datetime = _enhanced_decay_reference_datetime(ds, frame_index, decay_constant)
+    return _enhanced_administration_datetime(ds, reference_datetime, half_life, rph=rph)
 
-    if not administration_datetimes:
-        return None
-    if any(value != administration_datetimes[0] for value in administration_datetimes[1:]):
-        raise DataStructureError(
-            "Enhanced PET frames resolve to inconsistent radiopharmaceutical administration datetimes."
+
+def _coded_sequence_identity(item, sequence_keyword):
+    sequence = getattr(item, sequence_keyword, None)
+    if not sequence:
+        return "unspecified"
+    code_item = sequence[0]
+    code_value = _coded_value(code_item)
+    scheme = str(getattr(code_item, "CodingSchemeDesignator", "")).strip().upper()
+    return f"{scheme}:{code_value}" if code_value is not None else "unspecified"
+
+
+def _enhanced_radiopharmaceutical_identity(ds, rph):
+    base_identity = (
+        _coded_sequence_identity(rph, "RadionuclideCodeSequence"),
+        _coded_sequence_identity(rph, "RadiopharmaceuticalCodeSequence"),
+    )
+    sequence = getattr(ds, "RadiopharmaceuticalInformationSequence", None) or []
+    matching = [
+        (str(getattr(candidate, "RadiopharmaceuticalStartDateTime", "")).strip(), position, candidate)
+        for position, candidate in enumerate(sequence)
+        if (
+            _coded_sequence_identity(candidate, "RadionuclideCodeSequence"),
+            _coded_sequence_identity(candidate, "RadiopharmaceuticalCodeSequence"),
         )
-    return administration_datetimes[0]
+        == base_identity
+    ]
+    matching.sort(key=lambda entry: (entry[0], entry[1]))
+    occurrence = next((index for index, (_start, _position, candidate) in enumerate(matching, 1) if candidate is rph), 1)
+    identity = f"radionuclide {base_identity[0]}, radiopharmaceutical {base_identity[1]}"
+    return f"{identity}, administration {occurrence}" if len(matching) > 1 else identity
+
+
+def _enhanced_radiopharmaceutical_context_key(ds, rph, name):
+    if _is_legacy_converted_enhanced_pet(ds):
+        return name
+    return f"{name} [{_enhanced_radiopharmaceutical_identity(ds, rph)}]"
+
+
+def _store_normalization_context_value(context, name, value):
+    if name in context:
+        reference = context[name]
+        if isinstance(value, (int, float, np.number)) and isinstance(reference, (int, float, np.number)):
+            values_agree = np.isclose(value, reference, rtol=1e-12, atol=0.0)
+        else:
+            values_agree = value == reference
+        if not values_agree:
+            raise DataStructureError(f"Enhanced PET frames have inconsistent {name} values.")
+        return
+    context[name] = value
 
 
 def _legacy_converted_bqml_to_suvbw_factor(ds, context):
-    patient_weight, injected_dose, half_life = context
+    patient_weight = context["patient_weight"]
+    administration = context["administrations"][0]
+    injected_dose = administration["injected_dose"]
+    half_life = administration["half_life"]
     decay_correction = str(getattr(ds, "DecayCorrection", "")).strip().upper()
     if decay_correction == "ADMIN":
         return patient_weight * 1000.0 / injected_dose
@@ -1270,13 +1421,19 @@ def _enhanced_bqml_to_suvbw_factor(ds, frame_index, context):
     if _uses_legacy_converted_decay_timing(ds, frame_index):
         return _legacy_converted_bqml_to_suvbw_factor(ds, context)
 
-    patient_weight, injected_dose, half_life = context
+    administration = context["administrations"][0]
+    half_life = administration["half_life"]
     decay_constant = np.log(2) / half_life
     reference_datetime = _enhanced_decay_reference_datetime(ds, frame_index, decay_constant)
-    administration_datetime = _enhanced_administration_datetime(ds, reference_datetime, half_life)
+    administration_datetime = _enhanced_administration_datetime(
+        ds,
+        reference_datetime,
+        half_life,
+        rph=administration["rph"],
+    )
     elapsed_time = (reference_datetime - administration_datetime).total_seconds()
-    decay_corrected_dose = injected_dose * np.exp(-decay_constant * elapsed_time)
-    return patient_weight * 1000.0 / decay_corrected_dose
+    decay_corrected_dose = administration["injected_dose"] * np.exp(-decay_constant * elapsed_time)
+    return context["patient_weight"] * 1000.0 / decay_corrected_dose
 
 
 def _enhanced_cnts_scale(ds):
@@ -1343,35 +1500,56 @@ def _enhanced_suv_array(ds, return_normalization_context=False):
     bqml_frame_indices = [
         frame_index for frame_index, descriptor in enumerate(descriptors) if _descriptor_uses_bqml(ds, descriptor)
     ]
-    bqml_context = (
-        _enhanced_bqml_context(
+    bqml_contexts = {
+        frame_index: _enhanced_bqml_context(
             ds,
-            require_half_life=_bqml_frames_require_half_life(ds, bqml_frame_indices),
-            warn_on_unit_conversion=True,
+            frame_index,
+            require_half_life=_bqml_frames_require_half_life(ds, [frame_index]),
+            warn_on_unit_conversion=frame_index == bqml_frame_indices[0],
         )
-        if bqml_frame_indices
-        else None
-    )
+        for frame_index in bqml_frame_indices
+    }
     normalization_context = {}
-    if bqml_context is not None:
-        patient_weight, injected_dose, half_life = bqml_context
-        normalization_context.update(
-            {
-                "Patient Weight (0010,1030)": patient_weight,
-                "Radionuclide Total Dose (0018,1074)": injected_dose,
-            }
+    for frame_index, bqml_context in bqml_contexts.items():
+        _store_normalization_context_value(
+            normalization_context,
+            "Patient Weight (0010,1030)",
+            bqml_context["patient_weight"],
         )
-        if half_life is None:
-            rph = _single_radiopharmaceutical_item(ds)
-            raw_half_life = getattr(rph, "RadionuclideHalfLife", None)
-            if raw_half_life not in [None, ""]:
-                half_life = _finite_positive(raw_half_life, "Radionuclide Half Life (0018,1075)")
-        if half_life is not None:
-            normalization_context["Radionuclide Half Life (0018,1075)"] = half_life
+        for administration in bqml_context["administrations"]:
+            rph = administration["rph"]
+            injected_dose = administration["injected_dose"]
+            half_life = administration["half_life"]
+            dose_name = _enhanced_radiopharmaceutical_context_key(
+                ds,
+                rph,
+                "Radionuclide Total Dose (0018,1074)",
+            )
+            _store_normalization_context_value(normalization_context, dose_name, injected_dose)
+            if half_life is None:
+                raw_half_life = getattr(rph, "RadionuclideHalfLife", None)
+                if raw_half_life not in [None, ""]:
+                    half_life = _finite_positive(raw_half_life, "Radionuclide Half Life (0018,1075)")
+            if half_life is not None:
+                half_life_name = _enhanced_radiopharmaceutical_context_key(
+                    ds,
+                    rph,
+                    "Radionuclide Half Life (0018,1075)",
+                )
+                _store_normalization_context_value(normalization_context, half_life_name, half_life)
 
-        administration_datetime = _enhanced_administration_context(ds, bqml_frame_indices, half_life)
-        if administration_datetime is not None:
-            normalization_context["Radiopharmaceutical Start DateTime (0018,1078)"] = administration_datetime
+            administration_datetime = _enhanced_frame_administration_context(ds, frame_index, half_life, rph)
+            if administration_datetime is not None:
+                administration_name = _enhanced_radiopharmaceutical_context_key(
+                    ds,
+                    rph,
+                    "Radiopharmaceutical Start DateTime (0018,1078)",
+                )
+                _store_normalization_context_value(
+                    normalization_context,
+                    administration_name,
+                    administration_datetime,
+                )
 
     non_bw_suv_types = {
         descriptor["suv_type"]
@@ -1387,7 +1565,12 @@ def _enhanced_suv_array(ds, return_normalization_context=False):
     suv_frames = np.empty(stored_frames.shape, dtype=float)
     for frame_index, (stored_frame, descriptor) in enumerate(zip(stored_frames, descriptors)):
         physical_values = _apply_mapping(stored_frame, descriptor)
-        factor = _enhanced_descriptor_to_suvbw_factor(ds, frame_index, descriptor, bqml_context)
+        factor = _enhanced_descriptor_to_suvbw_factor(
+            ds,
+            frame_index,
+            descriptor,
+            bqml_contexts.get(frame_index),
+        )
         suv_frames[frame_index] = physical_values * factor
     if return_normalization_context:
         return suv_frames, normalization_context
@@ -1396,7 +1579,25 @@ def _enhanced_suv_array(ds, return_normalization_context=False):
 
 def _validate_enhanced_normalization_contexts(contexts):
     reference_values = {}
+    reference_bqml_fields = None
+    bqml_field_prefixes = (
+        "Radionuclide Total Dose (0018,1074)",
+        "Radionuclide Half Life (0018,1075)",
+        "Radiopharmaceutical Start DateTime (0018,1078)",
+    )
     for instance_index, context in enumerate(contexts):
+        bqml_fields = {
+            name for name in context if any(name.startswith(prefix) for prefix in bqml_field_prefixes)
+        }
+        if bqml_fields:
+            if reference_bqml_fields is None:
+                reference_bqml_fields = bqml_fields
+            elif bqml_fields != reference_bqml_fields:
+                raise DataStructureError(
+                    f"Enhanced PET instance {instance_index + 1} uses a different radiopharmaceutical "
+                    "administration context for Bq/ml SUV normalization."
+                )
+
         for name, value in context.items():
             reference_value = reference_values.get(name)
             if isinstance(value, (int, float, np.number)) and isinstance(reference_value, (int, float, np.number)):
