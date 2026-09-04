@@ -766,9 +766,7 @@ def _enhanced_radiopharmaceutical_items(ds, frame_index):
                 "Radiopharmaceutical Agent Number (0018,9729)."
             )
         if agent_number in items_by_agent_number:
-            raise DataStructureError(
-                f"Enhanced PET has duplicate radiopharmaceutical agent number {agent_number}."
-            )
+            raise DataStructureError(f"Enhanced PET has duplicate radiopharmaceutical agent number {agent_number}.")
         items_by_agent_number[agent_number] = rph
 
     missing_agent_numbers = referenced_agent_numbers - items_by_agent_number.keys()
@@ -1362,7 +1360,9 @@ def _enhanced_radiopharmaceutical_identity(ds, rph):
         == base_identity
     ]
     matching.sort(key=lambda entry: (entry[0], entry[1]))
-    occurrence = next((index for index, (_start, _position, candidate) in enumerate(matching, 1) if candidate is rph), 1)
+    occurrence = next(
+        (index for index, (_start, _position, candidate) in enumerate(matching, 1) if candidate is rph), 1
+    )
     identity = f"radionuclide {base_identity[0]}, radiopharmaceutical {base_identity[1]}"
     return f"{identity}, administration {occurrence}" if len(matching) > 1 else identity
 
@@ -1586,9 +1586,7 @@ def _validate_enhanced_normalization_contexts(contexts):
         "Radiopharmaceutical Start DateTime (0018,1078)",
     )
     for instance_index, context in enumerate(contexts):
-        bqml_fields = {
-            name for name in context if any(name.startswith(prefix) for prefix in bqml_field_prefixes)
-        }
+        bqml_fields = {name for name in context if any(name.startswith(prefix) for prefix in bqml_field_prefixes)}
         if bqml_fields:
             if reference_bqml_fields is None:
                 reference_bqml_fields = bqml_fields
