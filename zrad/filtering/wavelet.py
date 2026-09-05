@@ -100,10 +100,64 @@ class Simoncelli(BaseFilter):
         return response
 
     def _filter_periodic(self, image):
-        freq_resp = self._frequency_response(image.shape)
-        filtered_fft = np.fft.fftn(image) * freq_resp
-        result = np.fft.ifftn(filtered_fft)
-        return np.real(result)
+        spectrum = sp_fft.rfftn(image)
+        response = self._periodic_half_spectrum_response(image.shape)
+        spectrum *= response
+        if self.riesz_order is not None and sum(self.riesz_order) > 0:
+            total_order = sum(self.riesz_order)
+            coefficient = np.sqrt(factorial(total_order) / np.prod([factorial(o) for o in self.riesz_order]))
+            spectrum *= (-1j) ** total_order * coefficient
+        return sp_fft.irfftn(spectrum, s=image.shape)
+
+    def _periodic_half_spectrum_response(self, shape):
+        """Return the Hermitian half-spectrum equivalent of the full response."""
+        half_shape = (*shape[:-1], shape[-1] // 2 + 1)
+        total_order = sum(self.riesz_order) if self.riesz_order is not None else 0
+        array_order = (
+            (self.riesz_order[1], self.riesz_order[0], *self.riesz_order[2:]) if total_order else (0,) * len(shape)
+        )
+
+        def scalar_response(mirrored):
+            frequency_axes = []
+            for axis, size in enumerate(shape):
+                frequencies = np.fft.ifftshift(np.linspace(-np.pi, np.pi, size))
+                frequencies[0] = 0.0
+                count = half_shape[axis]
+                indices = np.arange(count)
+                if mirrored:
+                    indices = (-indices) % size
+                frequency_axes.append(frequencies[indices])
+            coordinates = np.meshgrid(*frequency_axes, indexing='ij', sparse=True)
+
+            response = np.zeros(half_shape, dtype=np.float64)
+            for coordinate in coordinates:
+                response += coordinate**2
+            np.sqrt(response, out=response)
+
+            nyquist = np.pi / (2 ** (self.decomposition_level - 1))
+            support = (response >= nyquist / 4.0) & (response <= nyquist)
+            values = response[support]
+            denominator = values.copy() if total_order else None
+            values *= 2.0 / nyquist
+            np.log2(values, out=values)
+            values *= np.pi / 2.0
+            np.cos(values, out=values)
+            if denominator is not None:
+                np.power(denominator, total_order, out=denominator)
+                values /= denominator
+
+            response.fill(0.0)
+            response[support] = values
+            for coordinate, order in zip(coordinates, array_order):
+                if order:
+                    response *= coordinate**order
+            return response
+
+        response = scalar_response(mirrored=False)
+        mirrored_response = scalar_response(mirrored=True)
+        response += (-1) ** total_order * mirrored_response
+        response *= 0.5
+        return response
 
     def _filter_nearest(self, image):
         """Filter an edge-replicated extension for nearest padding.
