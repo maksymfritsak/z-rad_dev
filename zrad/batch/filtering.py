@@ -1,5 +1,6 @@
 import logging
 from dataclasses import dataclass
+from numbers import Integral
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -496,11 +497,13 @@ def _optional_riesz_order(value, dimensionality: str):
 
 def _require_riesz_order(value, dimensionality: str) -> tuple[int, ...]:
     message = f"riesz_order must contain {dimensionality[0]} comma-separated non-negative integers."
-    if isinstance(value, str):
-        values = [item.strip() for item in value.split(',')]
-    else:
-        values = value
     try:
+        if isinstance(value, str):
+            values = [item.strip() for item in value.split(',')]
+        else:
+            values = tuple(value)
+            if any(not isinstance(item, Integral) or isinstance(item, bool) for item in values):
+                raise InvalidInputParametersError(message)
         result = tuple(int(item) for item in values)
     except (TypeError, ValueError):
         raise InvalidInputParametersError(message)

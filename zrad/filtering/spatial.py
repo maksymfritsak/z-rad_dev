@@ -264,6 +264,35 @@ class RieszLoG(LoG):
             result = transform(result, type=2, axis=axis, norm='ortho')
         return result
 
+    def _smooth_tensor_component(self, component, sigma, row, column):
+        if self.padding_type != 'reflect' or row == column:
+            return ndi.gaussian_filter(component, sigma=sigma, mode=self.padding_type)
+
+        # Cross-components are odd across the two Riesz axes and even across
+        # the remaining axis. Extend only a kernel halo along each odd axis,
+        # with a sign change at every half-sample reflection (also for small
+        # images whose smoothing kernel spans multiple reflections).
+        if sigma <= 1e-15:
+            return component.copy()
+        radius = int(4.0 * sigma + 0.5)
+        for axis, size in enumerate(component.shape):
+            if axis not in (row, column) or radius == 0:
+                component = ndi.gaussian_filter1d(component, sigma=sigma, axis=axis, mode='reflect')
+                continue
+            positions = np.arange(-radius, size + radius)
+            reflected = (positions // size) % 2 != 0
+            indices = positions % size
+            indices[reflected] = size - 1 - indices[reflected]
+            extended = np.take(component, indices, axis=axis)
+            axis_shape = [1] * component.ndim
+            axis_shape[axis] = positions.size
+            extended *= np.where(reflected, -1.0, 1.0).reshape(axis_shape)
+            smoothed = ndi.gaussian_filter1d(extended, sigma=sigma, axis=axis, mode='constant')
+            crop = [slice(None)] * component.ndim
+            crop[axis] = slice(radius, radius + size)
+            component = smoothed[tuple(crop)].copy()
+        return component
+
     def _aligned_second_order_response(self, image, log_response, riesz_transform, crop=None):
         if crop is None:
             crop = (slice(None),) * image.ndim
@@ -280,10 +309,11 @@ class RieszLoG(LoG):
         tensor = np.empty(output_shape + (3, 3))
         for row in range(3):
             for column in range(row, 3):
-                value = ndi.gaussian_filter(
+                value = self._smooth_tensor_component(
                     first_order_responses[row] * first_order_responses[column],
                     sigma=sigma,
-                    mode=self.padding_type,
+                    row=row,
+                    column=column,
                 )
                 tensor[..., row, column] = value[crop]
                 tensor[..., column, row] = value[crop]
