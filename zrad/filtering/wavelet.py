@@ -218,7 +218,7 @@ class Simoncelli(BaseFilter):
 
         result = sp_fft.irfftn(spectrum, s=extended.shape)
         crop = tuple(slice(before, before + length) for (before, _), length in zip(padding, image.shape))
-        return result[crop]
+        return result[crop].copy()
 
     def _filter(self, image):
         if self.padding_type == 'wrap':

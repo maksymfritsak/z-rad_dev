@@ -264,7 +264,10 @@ class RieszLoG(LoG):
             result = transform(result, type=2, axis=axis, norm='ortho')
         return result
 
-    def _aligned_second_order_response(self, image, log_response, riesz_transform):
+    def _aligned_second_order_response(self, image, log_response, riesz_transform, crop=None):
+        if crop is None:
+            crop = (slice(None),) * image.ndim
+        output_shape = image[crop].shape
         sigma = self.structure_tensor_sigma_mm / self.res_mm
         first_order_responses = []
         for axis in range(3):
@@ -272,7 +275,9 @@ class RieszLoG(LoG):
             order[axis] = 1
             first_order_responses.append(riesz_transform(image, order))
 
-        tensor = np.empty(image.shape + (3, 3))
+        # Smooth on the full domain, then retain only the final field of view.
+        # Eigensystems and steering are voxel-local and need no exterior tail.
+        tensor = np.empty(output_shape + (3, 3))
         for row in range(3):
             for column in range(row, 3):
                 value = ndi.gaussian_filter(
@@ -280,9 +285,11 @@ class RieszLoG(LoG):
                     sigma=sigma,
                     mode=self.padding_type,
                 )
-                tensor[..., row, column] = value
-                tensor[..., column, row] = value
+                tensor[..., row, column] = value[crop]
+                tensor[..., column, row] = value[crop]
+        del value, first_order_responses
         eigenvectors = np.linalg.eigh(tensor)[1]
+        del tensor
         rotation = np.swapaxes(eigenvectors[..., ::-1], -1, -2)
 
         target_axes = np.repeat(np.arange(3), self.riesz_order)
@@ -290,7 +297,7 @@ class RieszLoG(LoG):
         second_direction = rotation[..., target_axes[1], :]
         target_coefficient = np.sqrt(factorial(2) / np.prod([factorial(order) for order in self.riesz_order]))
 
-        response = np.zeros_like(image)
+        response = np.zeros(output_shape, dtype=image.dtype)
         for row in range(3):
             order = [0, 0, 0]
             order[row] = 2
@@ -298,7 +305,7 @@ class RieszLoG(LoG):
                 target_coefficient
                 * first_direction[..., row]
                 * second_direction[..., row]
-                * riesz_transform(log_response, order)
+                * riesz_transform(log_response, order)[crop]
             )
             for column in range(row + 1, 3):
                 order = [0, 0, 0]
@@ -310,7 +317,7 @@ class RieszLoG(LoG):
                         first_direction[..., row] * second_direction[..., column]
                         + first_direction[..., column] * second_direction[..., row]
                     )
-                    * riesz_transform(log_response, order)
+                    * riesz_transform(log_response, order)[crop]
                 )
         return response
 
@@ -336,10 +343,9 @@ class RieszLoG(LoG):
             truncate=self.cutoff,
         )
         if self.structure_tensor_sigma_mm is not None:
-            response = self._aligned_second_order_response(domain, log_response, riesz_transform)
-        else:
-            response = riesz_transform(log_response, order)
-        return response if crop is None else response[crop]
+            return self._aligned_second_order_response(domain, log_response, riesz_transform, crop=crop)
+        response = riesz_transform(log_response, order)
+        return response if crop is None else response[crop].copy()
 
     def _apply_array(self, img):
         # Image arrays are handled internally as (y, x, z), while the public

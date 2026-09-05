@@ -65,8 +65,8 @@ def create_batch_filter_from_input_params(input_params, parallel_backend):
         gabor_theta=input_params["filter_gabor_theta"],
         gabor_rotation_invariance=input_params["filter_gabor_rotinv"],
         gabor_orthogonal_planes=input_params["filter_gabor_ortho"],
-        riesz_order=input_params["filter_riesz_order"],
-        structure_tensor_sigma_mm=input_params["filter_structure_tensor_sigma_mm"],
+        riesz_order=input_params.get("filter_riesz_order"),
+        structure_tensor_sigma_mm=input_params.get("filter_structure_tensor_sigma_mm"),
         parallel_backend=parallel_backend,
     )
 
