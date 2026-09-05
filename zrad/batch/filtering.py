@@ -492,10 +492,10 @@ def _require_float(value, message: str) -> float:
 def _optional_riesz_order(value, dimensionality: str):
     if value is None or str(value).strip() == '':
         return None
-    return _require_riesz_order(value, dimensionality)
+    return _require_riesz_order(value, dimensionality, allow_zero=True)
 
 
-def _require_riesz_order(value, dimensionality: str) -> tuple[int, ...]:
+def _require_riesz_order(value, dimensionality: str, *, allow_zero: bool = False) -> tuple[int, ...]:
     message = f"riesz_order must contain {dimensionality[0]} comma-separated non-negative integers."
     try:
         if isinstance(value, str):
@@ -509,7 +509,7 @@ def _require_riesz_order(value, dimensionality: str) -> tuple[int, ...]:
         raise InvalidInputParametersError(message)
     if len(result) != int(dimensionality[0]) or any(item < 0 for item in result):
         raise InvalidInputParametersError(message)
-    if sum(result) == 0:
+    if not allow_zero and sum(result) == 0:
         raise InvalidInputParametersError("riesz_order must have a positive total order.")
     return result
 
