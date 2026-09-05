@@ -182,16 +182,38 @@ class RieszLoG(LoG):
     @staticmethod
     def _riesz_transform(image, order):
         total_order = sum(order)
-        coordinates = np.meshgrid(*(2.0 * np.pi * np.fft.fftfreq(size) for size in image.shape), indexing='ij')
-        radius = np.sqrt(sum(coordinate**2 for coordinate in coordinates))
+        spectrum = sp_fft.rfftn(image)
+        frequency_axes = [2.0 * np.pi * np.fft.fftfreq(size) for size in image.shape[:-1]]
+        last_axis = 2.0 * np.pi * np.fft.rfftfreq(image.shape[-1])
+        if image.shape[-1] % 2 == 0:
+            last_axis[-1] *= -1.0
+        frequency_axes.append(last_axis)
+        coordinates = np.meshgrid(*frequency_axes, indexing='ij', sparse=True)
+        radius = np.zeros(spectrum.shape, dtype=np.float64)
+        for coordinate in coordinates:
+            radius += coordinate**2
+        np.sqrt(radius, out=radius)
+        np.power(radius, total_order, out=radius)
+        radius[(0,) * image.ndim] = np.inf
+
         coefficient = np.sqrt(factorial(total_order) / np.prod([factorial(value) for value in order]))
-        numerator = np.ones(image.shape)
+        spectrum *= (-1j) ** total_order * coefficient
         for coordinate, value in zip(coordinates, order):
-            numerator *= coordinate**value
-        multiplier = np.zeros(image.shape, dtype=np.complex128)
-        nonzero = radius > 0
-        multiplier[nonzero] = (-1j) ** total_order * coefficient * numerator[nonzero] / radius[nonzero] ** total_order
-        return np.fft.ifftn(np.fft.fftn(image) * multiplier).real
+            if value:
+                spectrum *= coordinate**value
+        spectrum /= radius
+
+        # At self-conjugate Nyquist coordinates, an odd number of odd-axis
+        # powers contributes only to the imaginary part of a full inverse FFT.
+        cancel = np.zeros(spectrum.shape, dtype=bool)
+        for axis, (size, value) in enumerate(zip(image.shape, order)):
+            if size % 2 == 0 and value % 2:
+                axis_shape = [1] * image.ndim
+                axis_shape[axis] = spectrum.shape[axis]
+                cancel ^= np.arange(spectrum.shape[axis]).reshape(axis_shape) == size // 2
+        spectrum[cancel] = 0.0
+
+        return sp_fft.irfftn(spectrum, s=image.shape)
 
     def _boundary_aware_riesz_transform(self, image, order):
         """Apply the Riesz transform without imposing unintended periodicity."""
@@ -242,13 +264,13 @@ class RieszLoG(LoG):
             result = transform(result, type=2, axis=axis, norm='ortho')
         return result
 
-    def _aligned_second_order_response(self, image, log_response):
+    def _aligned_second_order_response(self, image, log_response, riesz_transform):
         sigma = self.structure_tensor_sigma_mm / self.res_mm
         first_order_responses = []
         for axis in range(3):
             order = [0, 0, 0]
             order[axis] = 1
-            first_order_responses.append(self._boundary_aware_riesz_transform(image, order))
+            first_order_responses.append(riesz_transform(image, order))
 
         tensor = np.empty(image.shape + (3, 3))
         for row in range(3):
@@ -276,7 +298,7 @@ class RieszLoG(LoG):
                 target_coefficient
                 * first_direction[..., row]
                 * second_direction[..., row]
-                * self._boundary_aware_riesz_transform(log_response, order)
+                * riesz_transform(log_response, order)
             )
             for column in range(row + 1, 3):
                 order = [0, 0, 0]
@@ -288,23 +310,47 @@ class RieszLoG(LoG):
                         first_direction[..., row] * second_direction[..., column]
                         + first_direction[..., column] * second_direction[..., row]
                     )
-                    * self._boundary_aware_riesz_transform(log_response, order)
+                    * riesz_transform(log_response, order)
                 )
         return response
 
-    def _apply_array(self, img):
-        log_response = super()._apply_array(img)
+    def _apply_composed(self, image, order):
+        """Apply LoG and Riesz on one consistently bounded domain."""
+        crop = None
+        if self.padding_type in ('constant', 'nearest'):
+            padding = tuple((size // 2, size - size // 2) for size in image.shape)
+            mode = 'edge' if self.padding_type == 'nearest' else 'constant'
+            domain = np.pad(image, padding, mode=mode)
+            crop = tuple(slice(before, before + size) for (before, _), size in zip(padding, image.shape))
+            riesz_transform = self._riesz_transform
+        else:
+            domain = image
+            riesz_transform = self._boundary_aware_riesz_transform
+
+        sigma = self.sigma_mm / self.res_mm
+        log_response = ndi.gaussian_laplace(
+            domain,
+            sigma=sigma,
+            mode=self.padding_type,
+            cval=self.padding_constant,
+            truncate=self.cutoff,
+        )
         if self.structure_tensor_sigma_mm is not None:
-            return self._aligned_second_order_response(img, log_response)
+            response = self._aligned_second_order_response(domain, log_response, riesz_transform)
+        else:
+            response = riesz_transform(log_response, order)
+        return response if crop is None else response[crop]
+
+    def _apply_array(self, img):
         # Image arrays are handled internally as (y, x, z), while the public
         # multi-index follows the physical image axes (x, y, z).
         order = (self.riesz_order[1], self.riesz_order[0], *self.riesz_order[2:])
         if self.dimensionality == '3D':
-            return self._boundary_aware_riesz_transform(log_response, order)
+            return self._apply_composed(img, order)
 
-        response = np.empty_like(log_response)
-        for index in range(log_response.shape[2]):
-            response[:, :, index] = self._boundary_aware_riesz_transform(log_response[:, :, index], order)
+        response = np.empty_like(img, dtype=np.result_type(img.dtype, np.float64))
+        for index in range(img.shape[2]):
+            response[:, :, index] = self._apply_composed(img[:, :, index], order)
         return response
 
 

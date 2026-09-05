@@ -2,6 +2,7 @@ from math import factorial
 
 import numpy as np
 import pywt
+from scipy import fft as sp_fft
 from scipy import ndimage as ndi
 
 from .base import BaseFilter
@@ -114,26 +115,54 @@ class Simoncelli(BaseFilter):
         padding = tuple((length // 2, length - length // 2) for length in image.shape)
         extended = np.pad(image, padding, mode='edge')
 
-        frequencies = np.meshgrid(*(2.0 * np.pi * np.fft.fftfreq(length) for length in extended.shape), indexing='ij')
-        radius = np.sqrt(sum(frequency**2 for frequency in frequencies))
+        spectrum = sp_fft.rfftn(extended)
+        frequency_axes = [2.0 * np.pi * np.fft.fftfreq(length) for length in extended.shape[:-1]]
+        last_axis = 2.0 * np.pi * np.fft.rfftfreq(extended.shape[-1])
+        if extended.shape[-1] % 2 == 0:
+            last_axis[-1] *= -1.0
+        frequency_axes.append(last_axis)
+        frequencies = np.meshgrid(*frequency_axes, indexing='ij', sparse=True)
+        radius = np.zeros(spectrum.shape, dtype=np.float64)
+        for frequency in frequencies:
+            radius += frequency**2
+        np.sqrt(radius, out=radius)
+
         nyquist = np.pi / (2 ** (self.decomposition_level - 1))
-        response = np.zeros(extended.shape, dtype=np.float64)
         support = (radius >= nyquist / 4.0) & (radius <= nyquist)
-        response[support] = np.cos((np.pi / 2.0) * np.log2(2.0 * radius[support] / nyquist))
+        radius[support] = np.cos((np.pi / 2.0) * np.log2(2.0 * radius[support] / nyquist))
+        radius[~support] = 0.0
+        spectrum *= radius
 
         if self.riesz_order is not None and sum(self.riesz_order) > 0:
             total_order = sum(self.riesz_order)
             coefficient = np.sqrt(factorial(total_order) / np.prod([factorial(o) for o in self.riesz_order]))
             array_order = (self.riesz_order[1], self.riesz_order[0], *self.riesz_order[2:])
-            numerator = np.ones(extended.shape, dtype=np.float64)
-            for frequency, order in zip(frequencies, array_order):
-                numerator *= frequency**order
-            nonzero = radius > 0
-            riesz = np.zeros(extended.shape, dtype=np.complex128)
-            riesz[nonzero] = (-1j) ** total_order * coefficient * numerator[nonzero] / radius[nonzero] ** total_order
-            response = response * riesz
 
-        result = np.fft.ifftn(np.fft.fftn(extended) * response).real
+            radius.fill(0.0)
+            for frequency in frequencies:
+                radius += frequency**2
+            np.sqrt(radius, out=radius)
+            np.power(radius, total_order, out=radius)
+            radius[(0,) * extended.ndim] = np.inf
+
+            spectrum *= (-1j) ** total_order * coefficient
+            for frequency, order in zip(frequencies, array_order):
+                if order:
+                    spectrum *= frequency**order
+            spectrum /= radius
+
+            # An odd number of odd powers evaluated on Nyquist axes is
+            # anti-Hermitian at that bin. The real part of the former full
+            # inverse FFT discarded exactly these coefficients.
+            cancel = np.zeros(spectrum.shape, dtype=bool)
+            for axis, (length, order) in enumerate(zip(extended.shape, array_order)):
+                if length % 2 == 0 and order % 2:
+                    axis_shape = [1] * extended.ndim
+                    axis_shape[axis] = spectrum.shape[axis]
+                    cancel ^= np.arange(spectrum.shape[axis]).reshape(axis_shape) == length // 2
+            spectrum[cancel] = 0.0
+
+        result = sp_fft.irfftn(spectrum, s=extended.shape)
         crop = tuple(slice(before, before + length) for (before, _), length in zip(padding, image.shape))
         return result[crop]
 
